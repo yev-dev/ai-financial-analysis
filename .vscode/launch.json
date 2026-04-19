@@ -1,0 +1,102 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Financial Document Analyst Dashboard",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${input:condaBasePath}/envs/${input:condaEnvName}/bin/python",
+            "module": "streamlit",
+            "args": [
+                "run",
+                "dashboard/financial_analyst_app.py",
+                "--server.port",
+                "${input:financialDashboardPort}"
+            ],
+            "env": {
+                "VECTOR_DB_DIR": "${input:vectorDbPath}"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        // {
+        //     "name": "Ollama Dashboard: Financial Document Analyst",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "python": "${input:condaBasePath}/envs/${input:condaEnvName}/bin/python",
+        //     "module": "streamlit",
+        //     "args": [
+        //         "run",
+        //         "dashboard/ollama_app.py"
+        //     ],
+        //     "env": {
+        //         "VECTOR_DB_DIR": "${input:vectorDbPath}"
+        //     },
+        //     "cwd": "${workspaceFolder}",
+        //     "console": "integratedTerminal",
+        //     "justMyCode": false
+        // },
+        {
+        "name": "LiteLLM Dashboard",
+        "type": "debugpy",
+        "request": "launch",
+        "python": "${input:condaBasePath}/envs/${input:condaEnvName}/bin/python",
+        "module": "streamlit",
+        "args": [
+            "run",
+            "dashboard/litellm_app.py",
+            "--server.port",
+            "${input:litellmDashboardPort}"
+        ],
+        "env": {
+            "VECTOR_DB_DIR": "${input:vectorDbPath}"
+        },
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal",
+        "justMyCode": false
+    }
+    ],
+    "compounds": [
+        {
+            "name": "Start Both Dashboards",
+            "configurations": [
+                "Financial Document Analyst Dashboard",
+                "LiteLLM Dashboard"
+            ]
+        }
+    ],
+    "inputs": [
+        {
+            "id": "condaEnvName",
+            "type": "promptString",
+            "description": "Conda environment name",
+            "default": "ai_fin"
+        },
+        {
+            "id": "condaBasePath",
+            "type": "promptString",
+            "description": "Conda installation base path",
+            "default": "/Users/yevgeniy/Development/Ext/anaconda3"
+        },
+        {
+            "id": "vectorDbPath",
+            "type": "promptString",
+            "description": "vector_db folder path",
+            "default": "${workspaceFolder}/vector_db"
+        },
+        {
+            "id": "financialDashboardPort",
+            "type": "promptString",
+            "description": "Financial dashboard Streamlit port",
+            "default": "8501"
+        },
+        {
+            "id": "litellmDashboardPort",
+            "type": "promptString",
+            "description": "LiteLLM dashboard Streamlit port",
+            "default": "8502"
+        }
+    ]
+
+}

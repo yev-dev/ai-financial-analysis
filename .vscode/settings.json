@@ -1,0 +1,20 @@
+{
+    "files.exclude": {
+        "**/__pycache__": true
+    },
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/src"
+    ],
+    "python-envs.pythonProjects": [
+        {
+            "path": "dashboard",
+            "envManager": "ms-python.python:conda",
+            "packageManager": "ms-python.python:conda"
+        },
+        {
+            "path": ".",
+            "envManager": "ms-python.python:conda",
+            "packageManager": "ms-python.python:conda"
+        }
+    ]
+}
