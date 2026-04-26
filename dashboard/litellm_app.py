@@ -1,10 +1,14 @@
 import os
+import json
+import re
 from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 
 # Import dashboard first so dashboard/__init__.py runs and bootstraps paths.
-from dashboard import DEFAULT_GITHUB_MODEL
+from dashboard import DEFAULT_GITHUB_MODEL, VECTOR_DB_DIR
 from fin_ai.core.request import ModelRequest, RequestPayload
 from fin_ai.core.response import ResponseFactory
 
@@ -12,6 +16,76 @@ from fin_ai.core.response import ResponseFactory
 st.set_page_config(page_title="LiteLLM Chat", layout="wide")
 st.title("LiteLLM Provider Chat")
 st.caption("Query either GitHub Models or local Ollama using fin_ai.core request/response wrappers.")
+
+HISTORY_FILE_PATH = Path(VECTOR_DB_DIR) / "litellm_answer_history.json"
+
+
+def _to_notebook_source(text: str) -> list[str]:
+    lines = text.splitlines()
+    if not lines:
+        return [""]
+    return [f"{line}\n" for line in lines[:-1]] + [lines[-1]]
+
+
+def _extract_python_code(text: str) -> str:
+    code_block_match = re.search(r"```python\s*(.*?)```", text, re.IGNORECASE | re.DOTALL)
+    if code_block_match:
+        return code_block_match.group(1).strip()
+
+    generic_block_match = re.search(r"```\s*(.*?)```", text, re.DOTALL)
+    if generic_block_match:
+        return generic_block_match.group(1).strip()
+
+    return text.strip()
+
+
+def _build_notebook(cells: list[dict]) -> str:
+    notebook = {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3",
+            },
+            "language_info": {
+                "name": "python",
+            },
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    return json.dumps(notebook, indent=2)
+
+
+def _load_answer_history() -> list[dict]:
+    if not HISTORY_FILE_PATH.exists():
+        return []
+    try:
+        payload = json.loads(HISTORY_FILE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            return []
+        return payload
+    except Exception:
+        return []
+
+
+def _save_answer_history(history: list[dict]) -> None:
+    HISTORY_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HISTORY_FILE_PATH.write_text(json.dumps(history, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def _history_to_notebook_cells(history: list[dict]) -> list[dict]:
+    cells: list[dict] = []
+    for item in history:
+        cell = item.get("notebook_cell")
+        if isinstance(cell, dict):
+            cells.append(cell)
+    return cells
+
+
+if "answer_history" not in st.session_state:
+    st.session_state["answer_history"] = _load_answer_history()
 
 provider_label_to_key = {
     "GitHub Models": "github",
@@ -26,12 +100,40 @@ with st.sidebar:
     response_format = st.selectbox(
         "Response Format",
         ResponseFactory.available(),
-        index=0,
+        index=ResponseFactory.available().index("markdown") if "markdown" in ResponseFactory.available() else 0,
         help="Rendering style implemented by fin_ai.core.response wrappers.",
     )
 
     temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.1)
     max_tokens = st.number_input("Max Tokens (optional)", min_value=0, value=0, step=32)
+
+    st.divider()
+    st.subheader("Notebook Export")
+    notebook_cell_language = st.selectbox(
+        "Answer Cell Type",
+        ["markdown", "python"],
+        index=0,
+        help="Each new answer is appended to the notebook using this cell type.",
+    )
+    notebook_filename = st.text_input("Notebook File Name", value="litellm_answers.ipynb")
+    notebook_cells = _history_to_notebook_cells(st.session_state["answer_history"])
+    st.caption(f"Saved answer cells (local history): {len(notebook_cells)}")
+
+    col_clear, col_download = st.columns(2)
+    with col_clear:
+        if st.button("Clear Historical Answers"):
+            st.session_state["answer_history"] = []
+            _save_answer_history([])
+            st.rerun()
+    with col_download:
+        notebook_json = _build_notebook(notebook_cells)
+        st.download_button(
+            "Download Notebook",
+            data=notebook_json,
+            file_name=notebook_filename,
+            mime="application/x-ipynb+json",
+            disabled=len(notebook_cells) == 0,
+        )
 
     if provider == "github":
         st.text_input("GitHub Model", value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL), key="github_model")
@@ -82,15 +184,46 @@ if st.button("Send", type="primary"):
         except Exception as exc:
             st.exception(exc)
         else:
+            answer_text = response.content or ""
+
+            if notebook_cell_language == "python":
+                cell_source = _to_notebook_source(_extract_python_code(answer_text))
+                cell_type = "code"
+            else:
+                cell_source = _to_notebook_source(answer_text)
+                cell_type = "markdown"
+
+            notebook_cell = {
+                "cell_type": cell_type,
+                "metadata": {
+                    "language": notebook_cell_language,
+                },
+                "source": cell_source,
+                **({"outputs": [], "execution_count": None} if cell_type == "code" else {}),
+            }
+
+            metadata = response.get_metadata()
+            metadata_dict = asdict(metadata)
+            metadata_dict.pop("raw_response", None)
+
+            st.session_state["answer_history"].append(
+                {
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "provider": provider,
+                    "model": metadata_dict.get("model"),
+                    "response_format": response_format,
+                    "answer": answer_text,
+                    "notebook_cell": notebook_cell,
+                    "metadata": metadata_dict,
+                }
+            )
+            _save_answer_history(st.session_state["answer_history"])
+
             st.subheader("Response")
             if response_format == "markdown":
                 st.markdown(response.render())
             else:
                 st.text(response.render())
-
-            metadata = response.get_metadata()
-            metadata_dict = asdict(metadata)
-            metadata_dict.pop("raw_response", None)
 
             st.subheader("Metadata")
             st.json(metadata_dict)

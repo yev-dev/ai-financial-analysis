@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import warnings
+from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from urllib.error import URLError
@@ -57,6 +58,54 @@ from dashboard.utils import (
     render_pdf_pages,
     sanitize_generated_python_code,
 )
+
+
+def _build_notebook(cells: list[dict]) -> str:
+    notebook = {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3",
+            },
+            "language_info": {"name": "python"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+    return json.dumps(notebook, indent=2)
+
+
+def _history_to_notebook_cells(history: list[dict], cell_language: str) -> list[dict]:
+    cells: list[dict] = []
+    for item in history:
+        q = item.get("question", "")
+        a = item.get("answer", "")
+        if not a:
+            continue
+        # Question as a markdown header cell
+        cells.append({
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [f"**Q:** {q}"],
+        })
+        # Answer cell
+        if cell_language == "python":
+            cells.append({
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [a],
+            })
+        else:
+            cells.append({
+                "cell_type": "markdown",
+                "metadata": {},
+                "source": [a],
+            })
+    return cells
 
 
 def render_response_output(response_text: str, response_type: str, panel_key: str) -> None:
@@ -212,6 +261,39 @@ def display_pdf_in_sidebar(pdf_path, file_name):
             st.sidebar.image(str(img_path), caption=f"Page {page_index}", width="stretch")
     except Exception as e:
         st.sidebar.error(f"Error loading PDF: {str(e)}")
+
+if "answer_history" not in st.session_state:
+    st.session_state["answer_history"] = []
+
+# ── Sidebar: Notebook export ───────────────────────────────────────────────
+with st.sidebar:
+    st.header("Export to Notebook")
+    notebook_cell_language = st.selectbox(
+        "Answer Cell Type",
+        ["markdown", "python"],
+        index=0,
+        key="notebook_cell_language",
+    )
+    notebook_filename = st.text_input(
+        "Notebook Filename",
+        value="financial_analysis_answers.ipynb",
+        key="notebook_filename",
+    )
+    notebook_cells = _history_to_notebook_cells(
+        st.session_state["answer_history"], notebook_cell_language
+    )
+    st.caption(f"Answers in session: {len(notebook_cells) // 2}")
+    notebook_json = _build_notebook(notebook_cells)
+    st.download_button(
+        "Download Notebook",
+        data=notebook_json,
+        file_name=notebook_filename or "financial_analysis_answers.ipynb",
+        mime="application/x-ipynb+json",
+        disabled=len(notebook_cells) == 0,
+    )
+    if st.button("Clear Session Answers", disabled=len(st.session_state["answer_history"]) == 0):
+        st.session_state["answer_history"] = []
+        st.rerun()
 
 # Streamlit title and layout
 st.title("Financial Data Analysis")
@@ -483,4 +565,13 @@ Answer:
         }
         append_question_history(selected_vector_db, QUESTION_HISTORY_DIR, history_entry)
         st.session_state["question_history"] = load_question_history(selected_vector_db, QUESTION_HISTORY_DIR)
+        st.session_state["answer_history"].append({
+            "question": question,
+            "answer": response,
+            "vector_db": selected_vector_db,
+            "model": selected_model,
+            "provider": selected_provider,
+            "response_type": response_type,
+            "timestamp": datetime.utcnow().isoformat(),
+        })
 
