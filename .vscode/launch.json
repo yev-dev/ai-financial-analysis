@@ -5,7 +5,7 @@
             "name": "Financial Document Analyst Dashboard",
             "type": "debugpy",
             "request": "launch",
-            "python": "${input:condaBasePath}/envs/${input:condaEnvName}/bin/python",
+            "python": "/Users/yevgeniy/Development/Ext/anaconda3/envs/${input:condaEnvName}/bin/python",
             "module": "streamlit",
             "args": [
                 "run",
@@ -24,7 +24,7 @@
         //     "name": "Ollama Dashboard: Financial Document Analyst",
         //     "type": "debugpy",
         //     "request": "launch",
-        //     "python": "${input:condaBasePath}/envs/${input:condaEnvName}/bin/python",
+        //     "python": "/Users/yevgeniy/Development/Ext/anaconda3/envs/${input:condaEnvName}/bin/python",
         //     "module": "streamlit",
         //     "args": [
         //         "run",
@@ -41,7 +41,7 @@
         "name": "LiteLLM Dashboard",
         "type": "debugpy",
         "request": "launch",
-        "python": "${input:condaBasePath}/envs/${input:condaEnvName}/bin/python",
+        "python": "/Users/yevgeniy/Development/Ext/anaconda3/envs/${input:condaEnvName}/bin/python",
         "module": "streamlit",
         "args": [
             "run",
@@ -72,12 +72,6 @@
             "type": "promptString",
             "description": "Conda environment name",
             "default": "ai_fin"
-        },
-        {
-            "id": "condaBasePath",
-            "type": "promptString",
-            "description": "Conda installation base path",
-            "default": "/Users/yevgeniy/Development/Ext/anaconda3"
         },
         {
             "id": "vectorDbPath",

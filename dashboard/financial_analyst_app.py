@@ -224,6 +224,15 @@ provider_label_to_key = {
 selected_provider_label = st.selectbox("Select Provider", list(provider_label_to_key.keys()), index=0)
 selected_provider = provider_label_to_key[selected_provider_label]
 
+http_proxy = st.text_input(
+    "HTTP Proxy (optional)",
+    value=os.getenv("HTTP_PROXY", ""),
+)
+https_proxy = st.text_input(
+    "HTTPS Proxy (optional)",
+    value=os.getenv("HTTPS_PROXY", ""),
+)
+
 if selected_provider == "ollama":
     default_model_index = (
         available_chat_models.index(DEFAULT_CHAT_MODEL)
@@ -438,15 +447,30 @@ Answer:
 """.strip()
 
         if selected_provider == "github":
-            if not github_token:
-                st.error("GitHub Token is required when GitHub Models provider is selected.")
-                st.stop()
-            os.environ["GITHUB_TOKEN"] = github_token
+            github_token = github_token.strip()
+            if github_token:
+                os.environ["GITHUB_TOKEN"] = github_token
+            else:
+                os.environ.pop("GITHUB_TOKEN", None)
             os.environ["GITHUB_MODEL"] = selected_model
             os.environ["GITHUB_ENDPOINT"] = github_endpoint
         else:
             os.environ["OLLAMA_MODEL"] = selected_model
             os.environ["OLLAMA_ENDPOINT"] = OLLAMA_BASE_URL
+
+        if http_proxy.strip():
+            os.environ["HTTP_PROXY"] = http_proxy.strip()
+            os.environ["http_proxy"] = http_proxy.strip()
+        else:
+            os.environ.pop("HTTP_PROXY", None)
+            os.environ.pop("http_proxy", None)
+
+        if https_proxy.strip():
+            os.environ["HTTPS_PROXY"] = https_proxy.strip()
+            os.environ["https_proxy"] = https_proxy.strip()
+        else:
+            os.environ.pop("HTTPS_PROXY", None)
+            os.environ.pop("https_proxy", None)
 
         llm_response = ModelRequest(provider=selected_provider, format="text").request(
             RequestPayload(

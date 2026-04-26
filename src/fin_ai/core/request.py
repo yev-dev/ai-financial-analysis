@@ -18,6 +18,20 @@ class RequestPayload:
     proxy_port: int | None = None
 
 
+@dataclass(slots=True)
+class LiteLLMProxy:
+    http_proxy: str | None = None
+    https_proxy: str | None = None
+
+    @classmethod
+    def from_env(cls) -> LiteLLMProxy | None:
+        http_proxy = (os.getenv("HTTP_PROXY") or os.getenv("http_proxy") or "").strip() or None
+        https_proxy = (os.getenv("HTTPS_PROXY") or os.getenv("https_proxy") or "").strip() or None
+        if not http_proxy and not https_proxy:
+            return None
+        return cls(http_proxy=http_proxy, https_proxy=https_proxy)
+
+
 class LiteLLMClient:
     """Low-level wrapper over LiteLLM completion calls."""
 
@@ -27,6 +41,7 @@ class LiteLLMClient:
         model: str,
         api_base: str,
         api_key: str | None = None,
+        proxy: LiteLLMProxy | None = None,
         proxy_host: str | None = None,
         proxy_port: int | None = None,
     ) -> None:
@@ -34,22 +49,40 @@ class LiteLLMClient:
         self.model = model
         self.api_base = api_base
         self.api_key = api_key
+        self.proxy = proxy
         self.proxy_host = proxy_host or os.getenv("PX_PROXY_HOST", "127.0.0.1")
         self.proxy_port = proxy_port
 
     @contextmanager
     def _proxy_env(self, proxy_port: int | None):
         """Temporarily set proxy env vars for LiteLLM HTTP calls."""
-        if not proxy_port:
-            yield
-            return
-
-        proxy_url = f"http://{self.proxy_host}:{proxy_port}"
         keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
         previous = {key: os.environ.get(key) for key in keys}
 
-        for key in keys:
-            os.environ[key] = proxy_url
+        proxy_values: dict[str, str] = {}
+        if self.proxy:
+            if self.proxy.http_proxy:
+                proxy_values["HTTP_PROXY"] = self.proxy.http_proxy
+                proxy_values["http_proxy"] = self.proxy.http_proxy
+            if self.proxy.https_proxy:
+                proxy_values["HTTPS_PROXY"] = self.proxy.https_proxy
+                proxy_values["https_proxy"] = self.proxy.https_proxy
+
+        if not proxy_values and proxy_port:
+            proxy_url = f"http://{self.proxy_host}:{proxy_port}"
+            proxy_values = {
+                "HTTP_PROXY": proxy_url,
+                "HTTPS_PROXY": proxy_url,
+                "http_proxy": proxy_url,
+                "https_proxy": proxy_url,
+            }
+
+        if not proxy_values:
+            yield
+            return
+
+        for key, value in proxy_values.items():
+            os.environ[key] = value
 
         try:
             yield
@@ -115,11 +148,13 @@ class ModelRequest:
 def _build_ollama_client() -> LiteLLMClient:
     endpoint = _normalize_ollama_endpoint(os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434"))
     model_name = os.getenv("OLLAMA_MODEL", "llama3.1")
+    proxy = LiteLLMProxy.from_env()
     default_proxy_port = _read_proxy_port_from_env()
     return LiteLLMClient(
         provider="ollama",
         model=f"ollama/{model_name}",
         api_base=endpoint,
+        proxy=proxy,
         proxy_port=default_proxy_port,
     )
 
@@ -130,12 +165,14 @@ def _build_github_client() -> LiteLLMClient:
         raise ValueError("Missing GITHUB_TOKEN in environment.")
     endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
     model_name = os.getenv("GITHUB_MODEL", "openai/gpt-4o")
+    proxy = LiteLLMProxy.from_env()
     default_proxy_port = _read_proxy_port_from_env()
     return LiteLLMClient(
         provider="github",
         model=model_name,
         api_base=endpoint,
         api_key=token,
+        proxy=proxy,
         proxy_port=default_proxy_port,
     )
 

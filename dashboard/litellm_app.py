@@ -33,6 +33,9 @@ with st.sidebar:
     temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.1)
     max_tokens = st.number_input("Max Tokens (optional)", min_value=0, value=0, step=32)
 
+    st.text_input("HTTP Proxy (optional)", value=os.getenv("HTTP_PROXY", ""), key="http_proxy")
+    st.text_input("HTTPS Proxy (optional)", value=os.getenv("HTTPS_PROXY", ""), key="https_proxy")
+
     if provider == "github":
         st.text_input("GitHub Model", value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL), key="github_model")
         st.text_input(
@@ -57,18 +60,36 @@ user_prompt = st.text_area(
 )
 
 if st.button("Send", type="primary"):
-    if provider == "github" and not st.session_state.get("github_token"):
-        st.error("GitHub Token is required when provider is GitHub Models.")
-    elif not user_prompt.strip():
+    if not user_prompt.strip():
         st.error("User Prompt cannot be empty.")
     else:
         if provider == "github":
             os.environ["GITHUB_MODEL"] = st.session_state["github_model"]
             os.environ["GITHUB_ENDPOINT"] = st.session_state["github_endpoint"]
-            os.environ["GITHUB_TOKEN"] = st.session_state["github_token"]
+            github_token = st.session_state.get("github_token", "").strip()
+            if github_token:
+                os.environ["GITHUB_TOKEN"] = github_token
+            else:
+                os.environ.pop("GITHUB_TOKEN", None)
         else:
             os.environ["OLLAMA_MODEL"] = st.session_state["ollama_model"]
             os.environ["OLLAMA_ENDPOINT"] = st.session_state["ollama_endpoint"]
+
+        http_proxy = st.session_state.get("http_proxy", "").strip()
+        https_proxy = st.session_state.get("https_proxy", "").strip()
+        if http_proxy:
+            os.environ["HTTP_PROXY"] = http_proxy
+            os.environ["http_proxy"] = http_proxy
+        else:
+            os.environ.pop("HTTP_PROXY", None)
+            os.environ.pop("http_proxy", None)
+
+        if https_proxy:
+            os.environ["HTTPS_PROXY"] = https_proxy
+            os.environ["https_proxy"] = https_proxy
+        else:
+            os.environ.pop("HTTPS_PROXY", None)
+            os.environ.pop("https_proxy", None)
 
         payload = RequestPayload(
             prompt=user_prompt.strip(),
