@@ -39,7 +39,7 @@ class LiteLLMClient:
 
     @contextmanager
     def _proxy_env(self, proxy_port: int | None):
-        """Temporarily set proxy env vars for LiteLLM HTTP calls."""
+        """Temporarily set proxy env vars for LiteLLM HTTP calls. Useful for per-request proxy configuration within a corporate network."""
         if not proxy_port:
             yield
             return

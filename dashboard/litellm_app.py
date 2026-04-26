@@ -32,6 +32,7 @@ with st.sidebar:
 
     temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.1)
     max_tokens = st.number_input("Max Tokens (optional)", min_value=0, value=0, step=32)
+    st.text_input("Proxy Port (optional)", value=os.getenv("PX_PROXY_PORT", ""), key="proxy_port_input")
 
     if provider == "github":
         st.text_input("GitHub Model", value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL), key="github_model")
@@ -57,9 +58,7 @@ user_prompt = st.text_area(
 )
 
 if st.button("Send", type="primary"):
-    if provider == "github" and not st.session_state.get("github_token"):
-        st.error("GitHub Token is required when provider is GitHub Models.")
-    elif not user_prompt.strip():
+    if not user_prompt.strip():
         st.error("User Prompt cannot be empty.")
     else:
         if provider == "github":
@@ -70,11 +69,21 @@ if st.button("Send", type="primary"):
             os.environ["OLLAMA_MODEL"] = st.session_state["ollama_model"]
             os.environ["OLLAMA_ENDPOINT"] = st.session_state["ollama_endpoint"]
 
+        raw_proxy_port = st.session_state.get("proxy_port_input", "").strip()
+        proxy_port = None
+        if raw_proxy_port:
+            try:
+                proxy_port = int(raw_proxy_port)
+            except ValueError:
+                st.error("Proxy Port must be a valid integer.")
+                st.stop()
+
         payload = RequestPayload(
             prompt=user_prompt.strip(),
             system_prompt=system_prompt.strip() or None,
             temperature=float(temperature),
             max_tokens=int(max_tokens) if max_tokens > 0 else None,
+            proxy_port=proxy_port
         )
 
         try:
