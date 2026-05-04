@@ -1,6 +1,56 @@
 # AI Financial Analysis
 
-Streamlit app for financial document Q and A using local models (Ollama), RAG, and FAISS.
+Streamlit app for question-and-answer over financial documents, designed as a lightweight
+research playground for experimenting with local and remote LLMs, retrieval-augmented
+generation (RAG), and FAISS-based vector search.
+
+This repository provides a Streamlit UI to upload or point to PDFs and text documents,
+index them with embeddings, and run semantic search + LLM-based answers with source
+citation and optional PDF page previews.
+
+## How it works
+
+Simple flow (high-level):
+
+User documents (PDF / text) -> chunker/cleaner -> embeddings (Ollama or remote) -> FAISS index
+-> retriever -> LLM (Ollama or remote) -> Answer + citations / page snippets
+
+ASCII diagram:
+
+	[User] -> [Streamlit UI] -> [Chunker & Indexer] -> [Embeddings Provider]
+																				 -> [FAISS index]
+	[Query] -> [Retriever] -> [LLM] -> [Answer + Sources]
+
+## Configuration examples
+
+Switching providers is done by selecting which embeddings/LLM endpoint to use. Example
+configuration (YAML):
+
+```yaml
+# Use either 'ollama' or 'remote' here
+model_provider: ollama
+
+ollama:
+	# Ollama server base URL (default local)
+	url: "http://localhost:11434"
+	chat_model: "llama2-chat"        # model name used for chat/generation
+	embedding_model: "llama2-embedding"  # model name used for embeddings
+
+github:
+	# Example GitHub-hosted model configuration. Replace values with the
+	# model repo/identifier and the environment variable holding your GitHub token.
+	# This assumes you are using a GitHub Models / Inference endpoint or a
+	# self-hosted inference gateway that accepts a repo identifier.
+	repo: "owner/model-name"           # e.g. 'my-org/finance-qa-model'
+	inference_url: "https://api.github.com/models/{owner}/{model}/infer"
+	token_env: "GITHUB_TOKEN"         # store token in env var
+	model: "v1.0"                     # provider-specific model tag
+	embedding_model: "embed-v1"       # embedding model name if separate
+```
+
+To switch between Ollama (local) and a remote provider, set `model_provider` to
+`ollama` or `remote` and populate the corresponding section with connection details.
+
 
 ## Prerequisites
 
@@ -41,8 +91,8 @@ Option B: Conda environment
 macOS/Linux/Windows:
 
 ```bash
-conda create -n ai_financial_analysis python=3.11 -y
-conda activate ai_financial_analysis
+conda create -n fin_ai python=3.11 -y
+conda activate fin_ai
 ```
 
 ### 2. Install pip-tools

@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from typing import Any, Type
 
+import litellm
 from litellm import completion
 from fin_ai.core.response import ConsoleModelResponse, ModelResponse, Provider, ResponseFactory, ResponseMetadata
+
+litellm.drop_params = True
 
 
 @dataclass(slots=True)

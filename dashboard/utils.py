@@ -1,4 +1,5 @@
 import ast
+import os
 import json
 import math
 import re
@@ -10,6 +11,8 @@ from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
 
+import requests
+from requests.exceptions import RequestException
 import matplotlib.pyplot as plt
 import pandas as pd
 import pymupdf
@@ -284,14 +287,112 @@ def load_local_model_options(
     return chat_model_names, embedding_model_names, None
 
 
-def get_embeddings(model_name: str, base_url: str) -> OllamaEmbeddings:
+def get_ollama_embeddings(model_name: str, base_url: str) -> OllamaEmbeddings:
+    """Return an OllamaEmbeddings instance connected to the given base_url.
+
+    Raises RuntimeError with actionable guidance if the model is not available or
+    Ollama can't be reached.
+    """
     try:
         return OllamaEmbeddings(model=model_name, base_url=base_url)
     except Exception as exc:
         error_text = str(exc)
         if "not found" in error_text.lower() and model_name in error_text:
             raise RuntimeError(
-                f"Embedding model '{model_name}' is not available in Ollama. "
-                f"Run: ollama pull {model_name}"
+                f"Embedding model '{model_name}' is not available in Ollama. Run: ollama pull {model_name}"
             ) from exc
-        raise RuntimeError(f"Failed to initialize Ollama embeddings: {error_text}") from exc
+        raise RuntimeError(
+            f"Failed to initialize Ollama embeddings: {error_text}.\nQuick check: curl {base_url}/api/tags"
+        ) from exc
+
+
+def get_github_embeddings(model_name: str, base_url: str | None = None) -> object:
+    """Return a lightweight GitHub embeddings adapter. GITHUB_TOKEN is optional.
+    base_url takes precedence over the GITHUB_EMBEDDING_BASE_URL env variable,
+    which in turn takes precedence over GITHUB_ENDPOINT.
+    """
+    github_token = os.getenv("GITHUB_TOKEN", "").strip()
+    github_model = model_name or os.getenv("GITHUB_EMBEDDING_MODEL", "openai/text-embedding-3-small").strip()
+    github_endpoint = (
+        base_url
+        or os.getenv("GITHUB_EMBEDDING_BASE_URL", "").strip()
+        or os.getenv("GITHUB_ENDPOINT", "").strip()
+        or "https://models.github.ai/inference"
+    )
+
+    if not github_model:
+        raise RuntimeError("A model must be set to use GitHub embeddings.")
+
+    class GitHubEmbeddings:
+        """Minimal embeddings adapter calling the GitHub Models embeddings endpoint.
+
+        POSTs JSON {"model": "...", "input": [...]} to `<endpoint>/embeddings`
+        following the OpenAI-compatible REST API used by GitHub Models.
+        """
+
+        def __init__(self, model: str, endpoint: str, token: str):
+            self.model = model
+            self.endpoint = endpoint.rstrip("/")
+            self.token = token
+            self.headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/vnd.github+json",
+            }
+            if self.token:
+                self.headers["Authorization"] = f"Bearer {self.token}"
+
+        def _request(self, inputs: list[str]) -> list[list[float]]:
+            url = f"{self.endpoint}/embeddings"
+            payload = {"model": self.model, "input": inputs}
+            try:
+                resp = requests.post(url, json=payload, headers=self.headers, timeout=30)
+                resp.raise_for_status()
+            except RequestException as re:
+                raise RuntimeError(f"Failed to call GitHub embeddings endpoint {url}: {re}") from re
+
+            data = resp.json()
+
+            # Common response shapes: OpenAI-like {data: [{embedding: [...]}, ...]}
+            if isinstance(data, dict):
+                if "data" in data and isinstance(data["data"], list):
+                    embeddings = []
+                    for item in data["data"]:
+                        if isinstance(item, dict) and "embedding" in item:
+                            embeddings.append(item["embedding"])
+                        elif isinstance(item, dict) and "embeddings" in item:
+                            embeddings.append(item["embeddings"])
+                        else:
+                            raise RuntimeError(f"Unexpected embedding item shape: {item}")
+                    return embeddings
+                if "embeddings" in data and isinstance(data["embeddings"], list):
+                    return data["embeddings"]
+
+            # If API returned a bare list-of-lists
+            if isinstance(data, list) and all(isinstance(i, list) for i in data):
+                return data
+
+            raise RuntimeError(f"Unable to parse embeddings response from GitHub endpoint: {data}")
+
+        def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return self._request(texts)
+
+        def embed_query(self, text: str) -> list[float]:
+            return self._request([text])[0]
+
+        def __call__(self, text: str) -> list[float]:
+            return self.embed_query(text)
+
+    return GitHubEmbeddings(model=github_model, endpoint=github_endpoint, token=github_token)
+
+
+def get_embeddings(model_name: str, base_url: str, provider: str = "ollama") -> object:
+    """
+    Return embeddings instance based on provider selection.
+    provider: "ollama" or "github"
+    """
+    if provider == "ollama":
+        return get_ollama_embeddings(model_name, base_url)
+    elif provider == "github":
+        return get_github_embeddings(model_name, base_url=base_url)
+    else:
+        raise ValueError(f"Unknown provider: {provider}")

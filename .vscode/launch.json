@@ -5,7 +5,7 @@
             "name": "Financial Document Analyst Dashboard",
             "type": "debugpy",
             "request": "launch",
-            "python": "${input:condaBasePath}/envs/${input:condaEnvName}/bin/python",
+            "python": "${command:python.interpreterPath}",
             "module": "streamlit",
             "args": [
                 "run",
@@ -20,28 +20,11 @@
             "console": "integratedTerminal",
             "justMyCode": false
         },
-        // {
-        //     "name": "Ollama Dashboard: Financial Document Analyst",
-        //     "type": "debugpy",
-        //     "request": "launch",
-        //     "python": "${input:condaBasePath}/envs/${input:condaEnvName}/bin/python",
-        //     "module": "streamlit",
-        //     "args": [
-        //         "run",
-        //         "dashboard/ollama_app.py"
-        //     ],
-        //     "env": {
-        //         "VECTOR_DB_DIR": "${input:vectorDbPath}"
-        //     },
-        //     "cwd": "${workspaceFolder}",
-        //     "console": "integratedTerminal",
-        //     "justMyCode": false
-        // },
         {
         "name": "LiteLLM Dashboard",
         "type": "debugpy",
         "request": "launch",
-        "python": "${input:condaBasePath}/envs/${input:condaEnvName}/bin/python",
+        "python": "${command:python.interpreterPath}",
         "module": "streamlit",
         "args": [
             "run",
@@ -72,12 +55,6 @@
             "type": "promptString",
             "description": "Conda environment name",
             "default": "ai_fin"
-        },
-        {
-            "id": "condaBasePath",
-            "type": "promptString",
-            "description": "Conda installation base path",
-            "default": "/Users/yevgeniy/Development/Ext/anaconda3"
         },
         {
             "id": "vectorDbPath",

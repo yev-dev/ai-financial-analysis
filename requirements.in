@@ -1,7 +1,7 @@
 agent-framework-core==1.0.0b260212
 agent-framework-devui==1.0.0b260212
 agent-framework-orchestrations==1.0.0b260212
-docling
+# docling
 faiss-cpu
 px
 litellm
