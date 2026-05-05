@@ -4,9 +4,26 @@ Streamlit app for question-and-answer over financial documents, designed as a li
 research playground for experimenting with local and remote LLMs, retrieval-augmented
 generation (RAG), and FAISS-based vector search.
 
+This repository is also a collection of practical explorations across AI model approaches,
+tools, and libraries. A key focus is cost-effective development: running models locally with
+the Ollama suite when possible, and using GitHub Copilot and GitHub Models as an affordable
+hosted option when local execution is not the best fit.
+
 This repository provides a Streamlit UI to upload or point to PDFs and text documents,
 index them with embeddings, and run semantic search + LLM-based answers with source
 citation and optional PDF page previews.
+
+## Projects
+
+1. LiteLLM Dashboard
+
+Cost-effective way to run queries against GitHub Copilot/GitHub Models or local
+Ollama models through LiteLLM, with a single interface for provider switching.
+
+2. Financial Analysis of Research Paper
+
+Exploration of end-to-end RAG workflows for financial documents: indexing,
+embeddings selection, vector retrieval, and question-answer analysis.
 
 ## How it works
 

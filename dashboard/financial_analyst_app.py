@@ -400,6 +400,9 @@ if selected_vector_db == "Upload New Document":
                 # Clean up the temporary file
                 Path(temp_path).unlink()
 
+                # Refresh dashboard state so new vector DB appears immediately.
+                st.rerun()
+
 elif selected_vector_db != "Upload New Document":
     # Load the selected vector DB
     vector_db_path = Path(VECTOR_DB_DIR) / f"{selected_vector_db}.faiss"

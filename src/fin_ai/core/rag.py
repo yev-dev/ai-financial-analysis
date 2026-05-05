@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 import warnings
 from pathlib import Path
 
@@ -37,6 +39,15 @@ def _load_and_convert_with_pymupdf(file_path):
 
 # Load and convert PDF to markdown content
 def load_and_convert_document(file_path):
+    source_path = Path(file_path)
+    with tempfile.TemporaryDirectory(prefix="fin_ai_pdf_") as temp_dir:
+        temp_pdf_path = Path(temp_dir) / source_path.name
+        shutil.copy2(source_path, temp_pdf_path)
+
+        return _convert_pdf_to_markdown(temp_pdf_path)
+
+
+def _convert_pdf_to_markdown(file_path: Path) -> str:
     try:
         from docling.document_converter import DocumentConverter
 
