@@ -32,6 +32,8 @@ from langchain_community.vectorstores import FAISS
 
 from dashboard import (
     DEFAULT_GITHUB_MODEL,
+    DEFAULT_GITHUB_EMBEDDING_MODEL,
+    GITHUB_EMBEDDING_BASE_URL,
     DEFAULT_CHAT_MODEL,
     DEFAULT_EMBEDDING_MODEL,
     OLLAMA_BASE_URL,
@@ -167,11 +169,12 @@ def render_pyodide_runner(initial_code: str, panel_key: str) -> None:
 
 @st.cache_data(ttl=10)
 def get_local_model_options() -> tuple[list[str], list[str], str | None]:
-    return load_local_model_options(
-        base_url=OLLAMA_BASE_URL,
-        default_chat_model=DEFAULT_CHAT_MODEL,
-        default_embedding_model=DEFAULT_EMBEDDING_MODEL,
-    )
+    return [DEFAULT_CHAT_MODEL], [DEFAULT_EMBEDDING_MODEL], None
+    # return load_local_model_options(
+    #     base_url=OLLAMA_BASE_URL,
+    #     default_chat_model=DEFAULT_CHAT_MODEL,
+    #     default_embedding_model=DEFAULT_EMBEDDING_MODEL,
+    # )
 
 
 @st.cache_data(ttl=300)
@@ -217,12 +220,15 @@ def display_pdf_in_sidebar(pdf_path, file_name):
 st.title("Financial Data Analysis")
 
 available_chat_models, available_embedding_models, model_load_error = get_local_model_options()
+
+# Provider selection for both chat and embeddings
 provider_label_to_key = {
     "Local Ollama": "ollama",
     "GitHub Models": "github",
 }
 selected_provider_label = st.selectbox("Select Provider", list(provider_label_to_key.keys()), index=0)
 selected_provider = provider_label_to_key[selected_provider_label]
+github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
 
 if selected_provider == "ollama":
     default_model_index = (
@@ -261,18 +267,32 @@ else:
         )
 
     github_endpoint = st.text_input(
-        "GitHub Endpoint",
-        value=os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference"),
-    )
+            "GitHub Endpoint",
+            value=os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference"),
+        )
+    github_embedding_endpoint = st.text_input(
+            "GitHub Embedding Endpoint",
+            value=os.getenv("GITHUB_EMBEDDING_BASE_URL", GITHUB_EMBEDDING_BASE_URL),
+        )
 
-default_embedding_index = (
-    available_embedding_models.index(DEFAULT_EMBEDDING_MODEL)
-    if DEFAULT_EMBEDDING_MODEL in available_embedding_models
-    else 0
-)
+
+# Embedding model selection (label changes based on provider)
+if selected_provider == "github":
+    github_embedding_models = [DEFAULT_GITHUB_EMBEDDING_MODEL, "openai/text-embedding-3-large"]
+    default_embedding_index = 0
+    available_embedding_models_display = github_embedding_models
+else:
+    github_embedding_endpoint = OLLAMA_BASE_URL
+    available_embedding_models_display = available_embedding_models
+    default_embedding_index = (
+        available_embedding_models.index(DEFAULT_EMBEDDING_MODEL)
+        if DEFAULT_EMBEDDING_MODEL in available_embedding_models
+        else 0
+    )
+embedding_label = "Select Embedding Model" if selected_provider == "github" else "Select Local Embedding Model"
 selected_embedding_model = st.selectbox(
-    "Select Local Embedding Model",
-    available_embedding_models,
+    embedding_label,
+    available_embedding_models_display,
     index=default_embedding_index,
 )
 
@@ -288,6 +308,7 @@ if model_load_error:
 st.caption(
     "Use the same embedding model that was used when the vector DB was created."
 )
+
 
 # Dropdown to select vector DB or upload a new document
 vector_db_options = [f.stem for f in Path(VECTOR_DB_DIR).glob("*.faiss")]
@@ -354,8 +375,10 @@ if selected_vector_db == "Upload New Document":
                 markdown_content = load_and_convert_document(temp_path)
                 chunks = get_markdown_splits(markdown_content)
 
-                # Initialize embeddings
-                embeddings = get_embeddings(selected_embedding_model, OLLAMA_BASE_URL)
+
+                # Initialize embeddings based on provider
+                embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
+                embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
 
                 # Create or load vector DB and store PDF along with it
                 vector_store = create_or_load_vector_store(uploaded_file.name.split(".")[0], chunks, embeddings)
@@ -377,11 +400,15 @@ if selected_vector_db == "Upload New Document":
                 # Clean up the temporary file
                 Path(temp_path).unlink()
 
+                # Refresh dashboard state so new vector DB appears immediately.
+                st.rerun()
+
 elif selected_vector_db != "Upload New Document":
     # Load the selected vector DB
     vector_db_path = Path(VECTOR_DB_DIR) / f"{selected_vector_db}.faiss"
     if vector_db_path.exists():
-        embeddings = get_embeddings(selected_embedding_model, OLLAMA_BASE_URL)
+        embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
+        embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
         vector_store = FAISS.load_local(str(vector_db_path), embeddings=embeddings, allow_dangerous_deserialization=True)
 
         # Display PDF in the sidebar
