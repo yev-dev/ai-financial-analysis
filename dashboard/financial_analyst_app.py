@@ -45,7 +45,9 @@ from dashboard import (
 from fin_ai.core.rag import (
     create_or_load_vector_store,
     get_markdown_splits,
+    load_embedding_metadata,
     load_and_convert_document,
+    save_embedding_metadata,
 )
 from fin_ai.core.request import ModelRequest, RequestPayload
 from dashboard.utils import (
@@ -56,6 +58,7 @@ from dashboard.utils import (
     get_embeddings,
     load_local_model_options,
     load_question_history,
+    purge_vector_db_assets,
     render_pdf_pages,
     sanitize_generated_python_code,
 )
@@ -302,6 +305,12 @@ response_type = st.selectbox(
     index=1,
 )
 
+auto_truncate_prompt = st.checkbox(
+    "Auto-truncate prompt (gpt-5 guard)",
+    value=True,
+    help="Disable only for debugging request-size failures with strict-input models.",
+)
+
 if model_load_error:
     st.warning(model_load_error)
 
@@ -314,6 +323,32 @@ st.caption(
 vector_db_options = [f.stem for f in Path(VECTOR_DB_DIR).glob("*.faiss")]
 vector_db_options.append("Upload New Document")  # Add option to upload a new document
 selected_vector_db = st.selectbox("Select Vector DB or Upload New Document", vector_db_options, index=0)
+
+if selected_vector_db != "Upload New Document":
+    with st.expander("Maintenance", expanded=False):
+        st.warning("This permanently deletes the selected vector DB and related files.")
+        confirm_purge = st.checkbox(
+            f"Confirm purge of '{selected_vector_db}'",
+            key=f"confirm_purge_{selected_vector_db}",
+        )
+        if st.button(
+            "Purge Vector DB",
+            type="secondary",
+            disabled=not confirm_purge,
+            key=f"purge_vector_db_{selected_vector_db}",
+        ):
+            deleted_paths = purge_vector_db_assets(
+                vector_db_name=selected_vector_db,
+                vector_db_dir=Path(VECTOR_DB_DIR),
+                history_dir=Path(QUESTION_HISTORY_DIR),
+            )
+            if deleted_paths:
+                st.session_state["question_history"] = []
+                st.session_state.pop("latest_response", None)
+                st.success(f"Purged vector DB '{selected_vector_db}'.")
+                st.rerun()
+            else:
+                st.warning(f"No files found to purge for '{selected_vector_db}'.")
 
 history_vector_db = selected_vector_db if selected_vector_db != "Upload New Document" else "__upload__"
 if st.session_state.get("history_vector_db") != history_vector_db:
@@ -382,6 +417,12 @@ if selected_vector_db == "Upload New Document":
 
                 # Create or load vector DB and store PDF along with it
                 vector_store = create_or_load_vector_store(uploaded_file.name.split(".")[0], chunks, embeddings)
+                save_embedding_metadata(
+                    uploaded_file.name.split(".")[0],
+                    provider=selected_provider,
+                    model=selected_embedding_model,
+                    base_url=embeddings_url,
+                )
 
                 # Ensure vector DB and PDF are stored correctly
                 vector_db_path = Path(VECTOR_DB_DIR) / f"{uploaded_file.name.split('.')[0]}.faiss"
@@ -407,8 +448,23 @@ elif selected_vector_db != "Upload New Document":
     # Load the selected vector DB
     vector_db_path = Path(VECTOR_DB_DIR) / f"{selected_vector_db}.faiss"
     if vector_db_path.exists():
-        embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
-        embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
+        embedding_metadata = load_embedding_metadata(selected_vector_db)
+        if embedding_metadata:
+            metadata_provider = embedding_metadata["provider"]
+            metadata_model = embedding_metadata["model"]
+            metadata_base_url = embedding_metadata["base_url"]
+            embeddings = get_embeddings(metadata_model, metadata_base_url, provider=metadata_provider)
+            st.caption(
+                f"Using saved embedding config for semantic search: "
+                f"{metadata_provider}/{metadata_model} @ {metadata_base_url}"
+            )
+        else:
+            embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
+            embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
+            st.warning(
+                "No embedding metadata found for this vector DB. "
+                "Falling back to currently selected embedding settings."
+            )
         vector_store = FAISS.load_local(str(vector_db_path), embeddings=embeddings, allow_dangerous_deserialization=True)
 
         # Display PDF in the sidebar
@@ -480,10 +536,20 @@ Answer:
                 prompt=prompt,
                 system_prompt="You are a concise financial analysis assistant.",
                 temperature=0.2,
+                auto_truncate_prompt=bool(auto_truncate_prompt),
             )
         )
 
         response = llm_response.content
+        metadata = llm_response.get_metadata()
+        if metadata.prompt_truncated:
+            before = metadata.prompt_tokens_before_guard
+            after = metadata.prompt_tokens_after_guard
+            st.warning(
+                f"Prompt was truncated to fit gpt-5 input limits"
+                f" ({before} -> {after} tokens before sending)."
+            )
+
         st.session_state["latest_response"] = {
             "question": question,
             "answer": response,
@@ -496,7 +562,7 @@ Answer:
         st.caption(
             f"Answer generated in {perf_counter() - start_time:.2f} seconds."
         )
-        st.caption(str(llm_response.get_metadata()))
+        st.caption(str(metadata))
 
         history_entry = {
             "question": question,

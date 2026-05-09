@@ -32,6 +32,11 @@ with st.sidebar:
 
     temperature = st.slider("Temperature", min_value=0.0, max_value=1.5, value=0.2, step=0.1)
     max_tokens = st.number_input("Max Tokens (optional)", min_value=0, value=0, step=32)
+    auto_truncate_prompt = st.checkbox(
+        "Auto-truncate prompt for strict-input models (e.g. gpt-5)",
+        value=True,
+        help="When enabled, oversized prompts are clipped before sending to strict-input models like gpt-5.",
+    )
     st.text_input("Proxy Port (optional)", value=os.getenv("PX_PROXY_PORT", ""), key="proxy_port_input")
 
     if provider == "github":
@@ -83,7 +88,8 @@ if st.button("Send", type="primary"):
             system_prompt=system_prompt.strip() or None,
             temperature=float(temperature),
             max_tokens=int(max_tokens) if max_tokens > 0 else None,
-            proxy_port=proxy_port
+            proxy_port=proxy_port,
+            auto_truncate_prompt=bool(auto_truncate_prompt),
         )
 
         try:
@@ -98,6 +104,14 @@ if st.button("Send", type="primary"):
                 st.text(response.render())
 
             metadata = response.get_metadata()
+            if metadata.prompt_truncated:
+                before = metadata.prompt_tokens_before_guard
+                after = metadata.prompt_tokens_after_guard
+                st.warning(
+                    f"Prompt was truncated to fit gpt-5 input limits"
+                    f" ({before} -> {after} tokens before sending)."
+                )
+
             metadata_dict = asdict(metadata)
             metadata_dict.pop("raw_response", None)
 
