@@ -42,19 +42,24 @@ from dashboard import (
 )
 
 
+from fin_ai.core.query import (
+    build_source_retriever_configs,
+    format_source_citations,
+    query_with_multi_source_prompting,
+)
 from fin_ai.core.rag import (
+    _create_source_metadata,
     create_or_load_vector_store,
     get_markdown_splits,
     load_and_convert_document,
+    discover_vector_stores_by_source,
 )
-from fin_ai.core.request import ModelRequest, RequestPayload
 from dashboard.utils import (
     append_question_history,
     clear_question_history,
     execute_python_code,
     extract_python_code,
     get_embeddings,
-    load_local_model_options,
     load_question_history,
     render_pdf_pages,
     sanitize_generated_python_code,
@@ -97,9 +102,20 @@ def render_response_output(response_text: str, response_type: str, panel_key: st
     st.markdown(response_text.replace('$', '\\$'))
 
 
+def render_source_citations(citations_text: str | None, response_type: str) -> None:
+    if not citations_text:
+        return
+
+    st.caption("Source-level citations")
+    if response_type == "Plain Text":
+        st.text(citations_text)
+    else:
+        st.markdown(citations_text.replace('$', '\\$'))
+
+
 def render_pyodide_runner(initial_code: str, panel_key: str) -> None:
-        code_json = json.dumps(initial_code)
-        html = f"""
+    code_json = json.dumps(initial_code)
+    html = f"""
 <div style=\"font-family: ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid #ddd; border-radius: 8px; padding: 10px;\">
     <div style=\"font-family: system-ui, -apple-system, Segoe UI, sans-serif; font-size: 14px; margin-bottom: 8px;\">
         A WebAssembly-powered Python kernel backed by Pyodide
@@ -164,7 +180,7 @@ def render_pyodide_runner(initial_code: str, panel_key: str) -> None:
     }};
 </script>
 """
-        components.html(html, height=460, scrolling=True)
+    components.html(html, height=460, scrolling=True)
 
 
 @st.cache_data(ttl=10)
@@ -215,6 +231,19 @@ def display_pdf_in_sidebar(pdf_path, file_name):
             st.sidebar.image(str(img_path), caption=f"Page {page_index}", width="stretch")
     except Exception as e:
         st.sidebar.error(f"Error loading PDF: {str(e)}")
+
+
+SUPPORTED_UPLOAD_TYPES = ["pdf", "csv", "json", "html", "docx"]
+SUPPORTED_SOURCE_SUFFIXES = [".pdf", ".csv", ".json", ".html", ".docx"]
+
+
+def find_source_document(vector_db_name: str) -> Path | None:
+    for suffix in SUPPORTED_SOURCE_SUFFIXES:
+        candidate = Path(VECTOR_DB_DIR) / f"{vector_db_name}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
+
 
 # Streamlit title and layout
 st.title("Financial Data Analysis")
@@ -310,124 +339,195 @@ st.caption(
 )
 
 
-# Dropdown to select vector DB or upload a new document
-vector_db_options = [f.stem for f in Path(VECTOR_DB_DIR).glob("*.faiss")]
-vector_db_options.append("Upload New Document")  # Add option to upload a new document
+# Discover vector stores grouped by source
+source_vector_stores = discover_vector_stores_by_source(VECTOR_DB_DIR)
+vector_db_names = list(source_vector_stores.keys())
+vector_db_options = vector_db_names + ["Upload New Document"]
 selected_vector_db = st.selectbox("Select Vector DB or Upload New Document", vector_db_options, index=0)
+
+selected_query_vector_dbs: list[str] = []
+retrieval_mode = "ensemble"
+source_grouping = "vector_db"
+use_llm_query_planner = False
+max_routed_sources = 1
+vector_store = None
+loaded_vector_stores: dict[str, FAISS] = {}
+query_source_configs = []
+selected_source_names: list[str] = []
 
 history_vector_db = selected_vector_db if selected_vector_db != "Upload New Document" else "__upload__"
 if st.session_state.get("history_vector_db") != history_vector_db:
     st.session_state["history_vector_db"] = history_vector_db
     st.session_state["question_history"] = load_question_history(history_vector_db, QUESTION_HISTORY_DIR)
 
-with st.expander("Previous Questions", expanded=False):
-    history = st.session_state.get("question_history", [])
-    if selected_vector_db == "Upload New Document":
-        st.caption("Question history is available after you select an existing vector DB.")
-    elif not history:
-        st.caption("No saved question history yet for this vector DB.")
-    else:
-        if st.button("Clear History", key=f"clear_history_{history_vector_db}"):
-            clear_question_history(history_vector_db, QUESTION_HISTORY_DIR)
-            st.session_state["question_history"] = []
-            st.rerun()
-
-        for index, item in enumerate(history[:10], start=1):
-            st.markdown(f"**Q:** {item['question']}")
-            st.caption(
-                f"Model: {item['chat_model']} | Embedding: {item['embedding_model']} | "
-                f"Type: {item.get('response_type', 'Markdown')} | Time: {item['answer_seconds']:.2f}s"
-            )
-            if item.get("answer"):
-                render_response_output(
-                    item["answer"],
-                    item.get("response_type", "Markdown"),
-                    panel_key=f"history_{history_vector_db}_{index}",
-                )
-            if st.button("Reuse Question", key=f"reuse_question_{history_vector_db}_{index}"):
-                st.session_state["question_input"] = item["question"]
+if selected_vector_db != "Upload New Document":
+    with st.expander("Previous Questions", expanded=False):
+        history = st.session_state.get("question_history", [])
+        if not history:
+            st.caption("No saved question history yet for this vector DB.")
+        else:
+            if st.button("Clear History", key=f"clear_history_{history_vector_db}"):
+                clear_question_history(history_vector_db, QUESTION_HISTORY_DIR)
+                st.session_state["question_history"] = []
                 st.rerun()
+
+            for index, item in enumerate(history[:10], start=1):
+                st.markdown(f"**Q:** {item['question']}")
+                st.caption(
+                    f"Model: {item['chat_model']} | Embedding: {item['embedding_model']} | "
+                    f"Type: {item.get('response_type', 'Markdown')} | "
+                    f"Mode: {item.get('retrieval_mode', 'ensemble')} | Time: {item['answer_seconds']:.2f}s"
+                )
+                if item.get("answer"):
+                    render_response_output(
+                        item["answer"],
+                        item.get("response_type", "Markdown"),
+                        panel_key=f"history_{history_vector_db}_{index}",
+                    )
+                    render_source_citations(item.get("citations"), item.get("response_type", "Markdown"))
+                if st.button("Reuse Question", key=f"reuse_question_{history_vector_db}_{index}"):
+                    st.session_state["question_input"] = item["question"]
+                    st.rerun()
+
+if selected_vector_db != "Upload New Document":
+    selected_query_vector_dbs = st.multiselect(
+        "Query Vector DB Sources",
+        vector_db_names,
+        default=[selected_vector_db],
+    )
+    if not selected_query_vector_dbs:
+        selected_query_vector_dbs = [selected_vector_db]
+    if selected_vector_db not in selected_query_vector_dbs:
+        selected_query_vector_dbs = [selected_vector_db] + selected_query_vector_dbs
+
+    retrieval_mode = st.selectbox(
+        "Retrieval Mode",
+        ["ensemble", "separate", "routed"],
+        index=0,
+    )
+    source_grouping = st.selectbox(
+        "Group Sources By",
+        ["vector_db", "filename", "source_type", "source"],
+        index=0,
+    )
+    use_llm_query_planner = st.checkbox(
+        "Use LLM query planner for routed mode",
+        value=True,
+        disabled=retrieval_mode != "routed",
+    )
+    max_routed_sources = st.slider(
+        "Max Routed Sources",
+        min_value=1,
+        max_value=max(1, len(selected_query_vector_dbs) * 4),
+        value=min(max(1, len(selected_query_vector_dbs)), max(1, len(selected_query_vector_dbs) * 4)),
+        disabled=retrieval_mode != "routed",
+    )
 
 # If 'Upload New Document' is selected, show the file uploader
 if selected_vector_db == "Upload New Document":
-    uploaded_file = st.file_uploader("Upload a PDF file for analysis", type=["pdf"])
+    uploaded_file = st.file_uploader(
+        "Upload a document for analysis",
+        type=SUPPORTED_UPLOAD_TYPES,
+    )
 
-    # Process the uploaded PDF
     if uploaded_file:
-        st.sidebar.subheader("Uploaded PDF")
+        document_suffix = Path(uploaded_file.name).suffix.lower()
+        st.sidebar.subheader("Uploaded Document")
         st.sidebar.write(uploaded_file.name)
 
-        # Save the PDF file temporarily and display it
         temp_path = f"temp_{uploaded_file.name}"
         document_binary = uploaded_file.read()
         with open(temp_path, "wb") as f:
             f.write(document_binary)
 
-        # Display PDF in the sidebar (show all pages)
-        display_pdf_in_sidebar(temp_path, uploaded_file.name.split('.')[0])
+        if document_suffix == ".pdf":
+            display_pdf_in_sidebar(temp_path, uploaded_file.name.split('.')[0])
+        else:
+            st.sidebar.info(f"Preview is not available for {document_suffix} files.")
 
-        # PDF processing button
-        if st.button("Process PDF and Store in Vector DB"):
+        if st.button("Process Document and Store in Vector DB"):
             with st.spinner("Processing document..."):
                 start_time = perf_counter()
-
-                # Convert PDF to markdown directly
                 markdown_content = load_and_convert_document(temp_path)
-                chunks = get_markdown_splits(markdown_content)
+                document_metadata = _create_source_metadata(temp_path, document_suffix.lstrip(".") or "file")
+                document_metadata["source"] = uploaded_file.name
+                document_metadata["filename"] = uploaded_file.name
+                document_metadata["file_size"] = len(document_binary)
+                chunks = get_markdown_splits(markdown_content, metadata=document_metadata)
 
-
-                # Initialize embeddings based on provider
                 embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
                 embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
 
-                # Create or load vector DB and store PDF along with it
                 vector_store = create_or_load_vector_store(uploaded_file.name.split(".")[0], chunks, embeddings)
-
-                # Ensure vector DB and PDF are stored correctly
                 vector_db_path = Path(VECTOR_DB_DIR) / f"{uploaded_file.name.split('.')[0]}.faiss"
-                vector_store.save_local(str(vector_db_path))  # Save FAISS vector store
+                vector_store.save_local(str(vector_db_path))
 
-                # Store the PDF file alongside the vector DB
-                pdf_path = Path(VECTOR_DB_DIR) / f"{uploaded_file.name}"
-                with open(pdf_path, "wb") as f:
+                source_path = Path(VECTOR_DB_DIR) / uploaded_file.name
+                with open(source_path, "wb") as f:
                     f.write(document_binary)
 
-                st.success("PDF processed and stored in the vector database.")
+                st.success("Document processed and stored in the vector database.")
                 st.caption(
                     f"Document processing completed in {perf_counter() - start_time:.2f} seconds."
                 )
 
-                # Clean up the temporary file
                 Path(temp_path).unlink()
-
-                # Refresh dashboard state so new vector DB appears immediately.
                 st.rerun()
 
 elif selected_vector_db != "Upload New Document":
-    # Load the selected vector DB
-    vector_db_path = Path(VECTOR_DB_DIR) / f"{selected_vector_db}.faiss"
-    if vector_db_path.exists():
-        embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
-        embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
-        vector_store = FAISS.load_local(str(vector_db_path), embeddings=embeddings, allow_dangerous_deserialization=True)
+    embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
+    embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
 
-        # Display PDF in the sidebar
-        pdf_path = Path(VECTOR_DB_DIR) / f"{selected_vector_db}.pdf"
-        if pdf_path.exists():
-            display_pdf_in_sidebar(pdf_path, selected_vector_db)
-        else:
-            st.sidebar.warning("PDF file not found for the selected vector DB.")
-    else:
+    for query_vector_db in selected_query_vector_dbs:
+        if query_vector_db in source_vector_stores:
+            query_vector_db_path = source_vector_stores[query_vector_db]
+            if query_vector_db_path.exists():
+                loaded_vector_stores[query_vector_db] = FAISS.load_local(
+                    str(query_vector_db_path),
+                    embeddings=embeddings,
+                    allow_dangerous_deserialization=True,
+                )
+
+    vector_store = loaded_vector_stores.get(selected_vector_db)
+    if vector_store is None:
         st.sidebar.warning(f"Vector DB '{selected_vector_db}' not found.")
+    else:
+        source_document = find_source_document(selected_vector_db)
+        if source_document and source_document.suffix.lower() == ".pdf":
+            display_pdf_in_sidebar(source_document, selected_vector_db)
+        elif source_document:
+            st.sidebar.info(f"Source document: {source_document.name}")
+        else:
+            st.sidebar.warning("Source document not found for the selected vector DB.")
 
-# Question input section
-question = st.text_input(
-    "Enter your question:",
-    placeholder="e.g., What is the company's revenue for the quarter?",
-    key="question_input",
-)
+        for query_vector_db, query_vector_store in loaded_vector_stores.items():
+            query_source_configs.extend(
+                build_source_retriever_configs(
+                    query_vector_store,
+                    base_name=query_vector_db,
+                    group_by=source_grouping,
+                    search_k=5,
+                )
+            )
 
-submit_clicked = st.button("Submit Question")
+        available_source_names = [config.name for config in query_source_configs]
+        selected_source_names = st.multiselect(
+            "Restrict to Source Groups",
+            available_source_names,
+            default=available_source_names,
+        )
+
+# Question input section (hidden while uploading a new document)
+question = ""
+submit_clicked = False
+if selected_vector_db != "Upload New Document":
+    question = st.text_input(
+        "Enter your question:",
+        placeholder="e.g., What is the company's revenue for the quarter?",
+        key="question_input",
+    )
+
+    submit_clicked = st.button("Submit Question")
 
 latest_response = st.session_state.get("latest_response")
 if latest_response and not submit_clicked:
@@ -437,77 +537,95 @@ if latest_response and not submit_clicked:
         latest_response.get("response_type", "Markdown"),
         panel_key="latest_response",
     )
+    render_source_citations(
+        latest_response.get("citations"),
+        latest_response.get("response_type", "Markdown"),
+    )
 
 # Button to process and generate answers
 if submit_clicked and question and selected_vector_db != "Upload New Document":
-    with st.spinner("Answering your question..."):
-        start_time = perf_counter()
+    active_source_configs = [
+        config for config in query_source_configs
+        if not selected_source_names or config.name in selected_source_names
+    ]
+    if not active_source_configs:
+        st.error("Select at least one source group before submitting a question.")
+    else:
+        with st.spinner("Answering your question..."):
+            start_time = perf_counter()
 
-        # Build retriever from the selected vector store
-        retriever = vector_store.as_retriever(search_type="mmr", search_kwargs={'k': 5})
+            if selected_provider == "github":
+                if not github_token:
+                    st.error("GitHub Token is required when GitHub Models provider is selected.")
+                    st.stop()
+                os.environ["GITHUB_TOKEN"] = github_token
+                os.environ["GITHUB_MODEL"] = selected_model
+                os.environ["GITHUB_ENDPOINT"] = github_endpoint
+            else:
+                os.environ["OLLAMA_MODEL"] = selected_model
+                os.environ["OLLAMA_ENDPOINT"] = OLLAMA_BASE_URL
 
-        docs = retriever.invoke(question)
-        context = "\n\n".join(doc.page_content for doc in docs)
-
-        prompt = f"""
-You are an assistant for financial data analysis. Use the retrieved context to answer questions.
-If you don't know the answer, say so.
-
-Response format requirement: {response_type}
-Formatting rules:
-- Plain Text: respond with plain text only. Do not use markdown lists, headings, or code fences.
-- Markdown: respond using clear markdown formatting.
-- Python Code: respond with Python code only inside a single fenced python code block, with no extra explanation outside the code block.
-
-Question: {question}
-Context: {context}
-Answer:
-""".strip()
-
-        if selected_provider == "github":
-            if not github_token:
-                st.error("GitHub Token is required when GitHub Models provider is selected.")
-                st.stop()
-            os.environ["GITHUB_TOKEN"] = github_token
-            os.environ["GITHUB_MODEL"] = selected_model
-            os.environ["GITHUB_ENDPOINT"] = github_endpoint
-        else:
-            os.environ["OLLAMA_MODEL"] = selected_model
-            os.environ["OLLAMA_ENDPOINT"] = OLLAMA_BASE_URL
-
-        llm_response = ModelRequest(provider=selected_provider, format="text").request(
-            RequestPayload(
-                prompt=prompt,
+            prompt_result = query_with_multi_source_prompting(
+                question,
+                active_source_configs,
+                provider=selected_provider,
+                response_format="text",
+                mode=retrieval_mode,
                 system_prompt="You are a concise financial analysis assistant.",
                 temperature=0.2,
+                max_sources=max_routed_sources if retrieval_mode == "routed" else None,
+                use_llm_planner=use_llm_query_planner and retrieval_mode == "routed",
+                planner_provider=selected_provider if use_llm_query_planner and retrieval_mode == "routed" else None,
             )
-        )
 
-        response = llm_response.content
-        st.session_state["latest_response"] = {
-            "question": question,
-            "answer": response,
-            "response_type": response_type,
-        }
+            llm_response = prompt_result.response
+            response = llm_response.content if llm_response is not None else ""
+            citations_text = format_source_citations(
+                prompt_result.retrieval,
+                response_type=response_type,
+            )
+            answer_seconds = perf_counter() - start_time
 
-        st.subheader("Latest Response")
-        render_response_output(response, response_type, panel_key="latest_response")
+            st.session_state["latest_response"] = {
+                "question": question,
+                "answer": response,
+                "response_type": response_type,
+                "citations": citations_text,
+                "retrieval_mode": retrieval_mode,
+                "selected_sources": prompt_result.retrieval.selected_sources,
+            }
 
-        st.caption(
-            f"Answer generated in {perf_counter() - start_time:.2f} seconds."
-        )
-        st.caption(str(llm_response.get_metadata()))
+            st.subheader("Latest Response")
+            render_response_output(response, response_type, panel_key="latest_response")
+            render_source_citations(citations_text, response_type)
 
-        history_entry = {
-            "question": question,
-            "answer": response,
-            "vector_db": selected_vector_db,
-            "chat_model": selected_model,
-            "provider": selected_provider,
-            "embedding_model": selected_embedding_model,
-            "response_type": response_type,
-            "answer_seconds": perf_counter() - start_time,
-        }
-        append_question_history(selected_vector_db, QUESTION_HISTORY_DIR, history_entry)
-        st.session_state["question_history"] = load_question_history(selected_vector_db, QUESTION_HISTORY_DIR)
+            with st.expander("Retrieval Details", expanded=False):
+                st.caption(f"Mode: {retrieval_mode}")
+                st.caption(f"Source grouping: {source_grouping}")
+                st.caption(f"Selected sources: {', '.join(prompt_result.retrieval.selected_sources)}")
+                if prompt_result.retrieval.routing_decision and prompt_result.retrieval.routing_decision.reasoning:
+                    st.caption(f"Routing rationale: {prompt_result.retrieval.routing_decision.reasoning}")
+
+            st.caption(f"Answer generated in {answer_seconds:.2f} seconds.")
+            if llm_response is not None:
+                st.caption(str(llm_response.get_metadata()))
+
+            history_entry = {
+                "question": question,
+                "answer": response,
+                "citations": citations_text,
+                "vector_db": selected_vector_db,
+                "vector_dbs": selected_query_vector_dbs,
+                "chat_model": selected_model,
+                "provider": selected_provider,
+                "embedding_model": selected_embedding_model,
+                "response_type": response_type,
+                "retrieval_mode": retrieval_mode,
+                "source_grouping": source_grouping,
+                "selected_sources": prompt_result.retrieval.selected_sources,
+                "routing_reasoning": prompt_result.retrieval.routing_decision.reasoning if prompt_result.retrieval.routing_decision else "",
+                "answer_seconds": answer_seconds,
+            }
+            append_question_history(selected_vector_db, QUESTION_HISTORY_DIR, history_entry)
+            st.session_state["question_history"] = load_question_history(selected_vector_db, QUESTION_HISTORY_DIR)
 

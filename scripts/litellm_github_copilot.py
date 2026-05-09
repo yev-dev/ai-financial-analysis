@@ -17,10 +17,36 @@ import urllib.request
 from pathlib import Path
 
 from litellm import completion
-
+from langchain_litellm import ChatLiteLLM
+from langchain_core.tools import tool
 
 DEFAULT_MODEL = "github_copilot/gpt-4o"
 TOKEN_FILE_NAME = "access-token"
+
+@tool
+def add(a: int, b: int) -> int:
+    """Adds a and b.
+
+    Args:
+        a: first int
+        b: second int
+    """
+    return a + b
+
+    return a + b
+
+
+@tool
+def multiply(a: int, b: int) -> int:
+    """Multiplies a and b.
+
+    Args:
+        a: first int
+        b: second int
+    """
+    return a * b
+
+tools = [add, multiply]
 
 
 def run_github_copilot(prompt: str, model: str = DEFAULT_MODEL) -> str:

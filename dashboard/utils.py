@@ -69,6 +69,7 @@ def load_question_history(vector_db_name: str, history_dir: Path) -> list[dict[s
 
 def save_question_history(vector_db_name: str, history_dir: Path, history: list[dict[str, Any]]) -> None:
     history_path = get_question_history_path(vector_db_name, history_dir)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
     history_path.write_text(
         json.dumps(history, ensure_ascii=True, indent=2),
         encoding="utf-8",

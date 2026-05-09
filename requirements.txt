@@ -100,6 +100,7 @@ cryptography==46.0.7
     # via
     #   azure-identity
     #   azure-storage-blob
+    #   langchain-litellm
     #   msal
     #   pyjwt
 curl-cffi==0.15.0
@@ -156,6 +157,8 @@ h11==0.16.0
     #   uvicorn
 hf-xet==1.4.3
     # via huggingface-hub
+html2text==2025.4.15
+    # via -r requirements.in
 httpcore==1.0.9
     # via httpx
 httptools==0.7.1
@@ -164,6 +167,7 @@ httpx==0.28.1
     # via
     #   chromadb
     #   huggingface-hub
+    #   langchain-litellm
     #   langgraph-sdk
     #   langsmith
     #   litellm
@@ -246,11 +250,14 @@ langchain-core==1.2.31
     #   langchain-chroma
     #   langchain-classic
     #   langchain-community
+    #   langchain-litellm
     #   langchain-ollama
     #   langchain-text-splitters
     #   langgraph
     #   langgraph-checkpoint
     #   langgraph-prebuilt
+langchain-litellm==0.6.4
+    # via -r requirements.in
 langchain-ollama==1.1.0
     # via -r requirements.in
 langchain-text-splitters==1.1.2
@@ -273,7 +280,9 @@ langsmith==0.7.32
     #   langchain-community
     #   langchain-core
 litellm==1.83.0
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   langchain-litellm
 markdown-it-py==4.0.0
     # via rich
 markupsafe==3.0.3
@@ -478,6 +487,15 @@ pyparsing==3.3.2
     # via matplotlib
 pypika==0.51.1
     # via chromadb
+pytest==8.4.2
+    # via
+    #   -r requirements.in
+    #   pytest-asyncio
+    #   pytest-cov
+pytest-asyncio==0.24.0
+    # via -r requirements.in
+pytest-cov==6.0.0
+    # via -r requirements.in
 pyproject-hooks==1.2.0
     # via build
 python-dateutil==2.9.0.post0
@@ -494,6 +512,8 @@ python-dotenv==1.2.2
     #   litellm
     #   pydantic-settings
     #   uvicorn
+python-docx==1.2.0
+    # via -r requirements.in
 python-multipart==0.0.26
     # via mcp
 pytz==2026.1.post1

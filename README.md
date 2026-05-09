@@ -281,3 +281,7 @@ python -m streamlit run app.py
 ### Sample Research Papers
 
 [Sample Research](<https://mergersandinquisitions.com/equity-research-report/#:~:text=You%20can%20get%20the%20reports,here)%20has%20the%20following%20components:>)
+
+### References
+
+[Finding the Best Open-Source Embedding Model for RAG](https://www.tigerdata.com/blog/finding-the-best-open-source-embedding-model-for-rag)
