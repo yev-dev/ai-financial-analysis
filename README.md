@@ -1,6 +1,6 @@
 # AI Financial Analysis
 
-Streamlit app for question-and-answer over financial documents, designed as a lightweight
+Streamlit  Dashboard app for question-and-answer over financial documents, designed as a lightweight
 research playground for experimenting with local and remote LLMs, retrieval-augmented
 generation (RAG), and FAISS-based vector search.
 
@@ -12,6 +12,13 @@ hosted option when local execution is not the best fit.
 This repository provides a Streamlit UI to upload or point to PDFs and text documents,
 index them with embeddings, and run semantic search + LLM-based answers with source
 citation and optional PDF page previews.
+
+Architecture note: this project is built around a RAG + embeddings pipeline.
+RAG (Retrieval-Augmented Generation) means the app first retrieves relevant document
+chunks for a question, then passes that context to the LLM to generate a grounded answer.
+Embeddings are numeric vector representations of text that capture semantic meaning, so
+similar questions and passages are close in vector space. We store and search those vectors
+with FAISS (Facebook AI Similarity Search), which powers fast nearest-neighbor retrieval.
 
 ## Projects
 
@@ -37,6 +44,28 @@ ASCII diagram:
 	[User] -> [Streamlit UI] -> [Chunker & Indexer] -> [Embeddings Provider]
 																				 -> [FAISS index]
 	[Query] -> [Retriever] -> [LLM] -> [Answer + Sources]
+
+### Retrieval modes
+
+The app supports three retrieval modes for multi-source question answering:
+
+- `separate`: Queries each selected source independently and keeps results grouped by source.
+	This is useful when you want source-by-source visibility and explicit cross-source comparison.
+- `ensemble`: Queries selected sources, then merges and re-ranks results into one combined context
+	using weighted fusion. This is useful when you want the strongest overall evidence regardless of
+	which source it came from.
+- `routed`: First chooses a smaller subset of likely relevant sources (heuristic routing or optional
+	LLM planner), then retrieves from only those sources. This is useful for faster, more focused
+	retrieval on broad source sets.
+
+How they differ in approach:
+
+- Scope of retrieval: `separate` and `ensemble` use all selected sources, while `routed` narrows
+	to a subset before retrieval.
+- Evidence organization: `separate` preserves per-source structure; `ensemble` blends evidence
+	into a single ranked set; `routed` returns evidence from routed sources only.
+- Typical tradeoff: `separate` gives transparency, `ensemble` gives strongest aggregate relevance,
+	and `routed` gives efficiency and focus.
 
 ## Configuration examples
 
