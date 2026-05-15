@@ -52,8 +52,9 @@ from fin_ai.core.rag import (
     _create_source_metadata,
     create_or_load_vector_store,
     get_markdown_splits,
+    load_embedding_metadata,
     load_and_convert_document,
-    discover_vector_stores_by_source,
+    save_embedding_metadata,
 )
 from dashboard.utils import (
     append_question_history,
@@ -62,6 +63,7 @@ from dashboard.utils import (
     extract_python_code,
     get_embeddings,
     load_question_history,
+    purge_vector_db_assets,
     render_pdf_pages,
     render_csv_thumbnail,
     sanitize_generated_python_code,
@@ -369,6 +371,96 @@ if is_upload_mode:
         SUPPORTED_UPLOAD_TYPES,
         index=0,
     )
+embedding_label = "Select Embedding Model" if selected_provider == "github" else "Select Local Embedding Model"
+selected_embedding_model = st.selectbox(
+    embedding_label,
+    available_embedding_models_display,
+    index=default_embedding_index,
+)
+
+response_type = st.selectbox(
+    "Select Response Type",
+    ["Plain Text", "Markdown", "Python Code"],
+    index=1,
+)
+
+auto_truncate_prompt = st.checkbox(
+    "Auto-truncate prompt (gpt-5 guard)",
+    value=True,
+    help="Disable only for debugging request-size failures with strict-input models.",
+)
+
+if model_load_error:
+    st.warning(model_load_error)
+
+st.caption(
+    "Use the same embedding model that was used when the vector DB was created."
+)
+
+
+# Dropdown to select vector DB or upload a new document
+vector_db_options = [f.stem for f in Path(VECTOR_DB_DIR).glob("*.faiss")]
+vector_db_options.append("Upload New Document")  # Add option to upload a new document
+selected_vector_db = st.selectbox("Select Vector DB or Upload New Document", vector_db_options, index=0)
+
+if selected_vector_db != "Upload New Document":
+    with st.expander("Maintenance", expanded=False):
+        st.warning("This permanently deletes the selected vector DB and related files.")
+        confirm_purge = st.checkbox(
+            f"Confirm purge of '{selected_vector_db}'",
+            key=f"confirm_purge_{selected_vector_db}",
+        )
+        if st.button(
+            "Purge Vector DB",
+            type="secondary",
+            disabled=not confirm_purge,
+            key=f"purge_vector_db_{selected_vector_db}",
+        ):
+            deleted_paths = purge_vector_db_assets(
+                vector_db_name=selected_vector_db,
+                vector_db_dir=Path(VECTOR_DB_DIR),
+                history_dir=Path(QUESTION_HISTORY_DIR),
+            )
+            if deleted_paths:
+                st.session_state["question_history"] = []
+                st.session_state.pop("latest_response", None)
+                st.success(f"Purged vector DB '{selected_vector_db}'.")
+                st.rerun()
+            else:
+                st.warning(f"No files found to purge for '{selected_vector_db}'.")
+
+history_vector_db = selected_vector_db if selected_vector_db != "Upload New Document" else "__upload__"
+if st.session_state.get("history_vector_db") != history_vector_db:
+    st.session_state["history_vector_db"] = history_vector_db
+    st.session_state["question_history"] = load_question_history(history_vector_db, QUESTION_HISTORY_DIR)
+
+with st.expander("Previous Questions", expanded=False):
+    history = st.session_state.get("question_history", [])
+    if selected_vector_db == "Upload New Document":
+        st.caption("Question history is available after you select an existing vector DB.")
+    elif not history:
+        st.caption("No saved question history yet for this vector DB.")
+    else:
+        if st.button("Clear History", key=f"clear_history_{history_vector_db}"):
+            clear_question_history(history_vector_db, QUESTION_HISTORY_DIR)
+            st.session_state["question_history"] = []
+            st.rerun()
+
+        for index, item in enumerate(history[:10], start=1):
+            st.markdown(f"**Q:** {item['question']}")
+            st.caption(
+                f"Model: {item['chat_model']} | Embedding: {item['embedding_model']} | "
+                f"Type: {item.get('response_type', 'Markdown')} | Time: {item['answer_seconds']:.2f}s"
+            )
+            if item.get("answer"):
+                render_response_output(
+                    item["answer"],
+                    item.get("response_type", "Markdown"),
+                    panel_key=f"history_{history_vector_db}_{index}",
+                )
+            if st.button("Reuse Question", key=f"reuse_question_{history_vector_db}_{index}"):
+                st.session_state["question_input"] = item["question"]
+                st.rerun()
 
     uploaded_file = st.file_uploader(
         "Upload a document for analysis",
@@ -410,6 +502,14 @@ if is_upload_mode:
                 embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
 
                 vector_store = create_or_load_vector_store(uploaded_file.name.split(".")[0], chunks, embeddings)
+                save_embedding_metadata(
+                    uploaded_file.name.split(".")[0],
+                    provider=selected_provider,
+                    model=selected_embedding_model,
+                    base_url=embeddings_url,
+                )
+
+                # Ensure vector DB and PDF are stored correctly
                 vector_db_path = Path(VECTOR_DB_DIR) / f"{uploaded_file.name.split('.')[0]}.faiss"
                 vector_store.save_local(str(vector_db_path))
 
@@ -424,40 +524,34 @@ if is_upload_mode:
 
                 temp_path.unlink(missing_ok=True)
                 st.rerun()
-else:
-    if selected_provider == "ollama":
-        default_model_index = (
-            available_chat_models.index(DEFAULT_CHAT_MODEL)
-            if DEFAULT_CHAT_MODEL in available_chat_models
-            else 0
-        )
-        selected_model = st.selectbox(
-            "Select Local Ollama Model",
-            available_chat_models,
-            index=default_model_index,
-        )
-    else:
-        github_token = st.text_input(
-            "GitHub Token",
-            value=os.getenv("GITHUB_TOKEN", ""),
-            type="password",
-        )
-        github_model_options, github_model_error = get_github_model_options(github_token)
-        
-        # Add checkbox to filter for GPT models only
-        use_default_gpt_models = st.checkbox(
-            "Default (GPT models only)",
-            value=True,
-            help="Show only recommended GPT family models"
-        )
-        
-        # Filter models if checkbox is enabled
-        if use_default_gpt_models:
-            filtered_model_options = [m for m in github_model_options if any(gpt in m.lower() for gpt in DEFAULT_GITHUB_MODELS)]
-            # If no GPT models found, fall back to all models
-            if not filtered_model_options:
-                filtered_model_options = github_model_options
-            display_model_options = filtered_model_options
+
+elif selected_vector_db != "Upload New Document":
+    # Load the selected vector DB
+    vector_db_path = Path(VECTOR_DB_DIR) / f"{selected_vector_db}.faiss"
+    if vector_db_path.exists():
+        embedding_metadata = load_embedding_metadata(selected_vector_db)
+        if embedding_metadata:
+            metadata_provider = embedding_metadata["provider"]
+            metadata_model = embedding_metadata["model"]
+            metadata_base_url = embedding_metadata["base_url"]
+            embeddings = get_embeddings(metadata_model, metadata_base_url, provider=metadata_provider)
+            st.caption(
+                f"Using saved embedding config for semantic search: "
+                f"{metadata_provider}/{metadata_model} @ {metadata_base_url}"
+            )
+        else:
+            embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
+            embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
+            st.warning(
+                "No embedding metadata found for this vector DB. "
+                "Falling back to currently selected embedding settings."
+            )
+        vector_store = FAISS.load_local(str(vector_db_path), embeddings=embeddings, allow_dangerous_deserialization=True)
+
+        # Display PDF in the sidebar
+        pdf_path = Path(VECTOR_DB_DIR) / f"{selected_vector_db}.pdf"
+        if pdf_path.exists():
+            display_pdf_in_sidebar(pdf_path, selected_vector_db)
         else:
             display_model_options = github_model_options
         
@@ -713,59 +807,44 @@ if submit_clicked and question and selected_vector_db != "Upload New Document":
                 mode=retrieval_mode,
                 system_prompt="You are a concise financial analysis assistant.",
                 temperature=0.2,
-                max_sources=max_routed_sources if retrieval_mode == "routed" else None,
-                use_llm_planner=use_llm_query_planner and retrieval_mode == "routed",
-                planner_provider=selected_provider if use_llm_query_planner and retrieval_mode == "routed" else None,
+                auto_truncate_prompt=bool(auto_truncate_prompt),
+            )
+        )
+
+        response = llm_response.content
+        metadata = llm_response.get_metadata()
+        if metadata.prompt_truncated:
+            before = metadata.prompt_tokens_before_guard
+            after = metadata.prompt_tokens_after_guard
+            st.warning(
+                f"Prompt was truncated to fit gpt-5 input limits"
+                f" ({before} -> {after} tokens before sending)."
             )
 
-            llm_response = prompt_result.response
-            response = llm_response.content if llm_response is not None else ""
-            citations_text = format_source_citations(
-                prompt_result.retrieval,
-                response_type=response_type,
-            )
-            answer_seconds = perf_counter() - start_time
+        st.session_state["latest_response"] = {
+            "question": question,
+            "answer": response,
+            "response_type": response_type,
+        }
 
-            st.session_state["latest_response"] = {
-                "question": question,
-                "answer": response,
-                "response_type": response_type,
-                "citations": citations_text,
-                "retrieval_mode": retrieval_mode,
-                "selected_sources": prompt_result.retrieval.selected_sources,
-            }
+        st.subheader("Latest Response")
+        render_response_output(response, response_type, panel_key="latest_response")
 
-            st.subheader("Latest Response")
-            render_response_output(response, response_type, panel_key="latest_response")
-            render_source_citations(citations_text, response_type)
+        st.caption(
+            f"Answer generated in {perf_counter() - start_time:.2f} seconds."
+        )
+        st.caption(str(metadata))
 
-            with st.expander("Retrieval Details", expanded=False):
-                st.caption(f"Mode: {retrieval_mode}")
-                st.caption(f"Source grouping: {source_grouping}")
-                st.caption(f"Selected sources: {', '.join(prompt_result.retrieval.selected_sources)}")
-                if prompt_result.retrieval.routing_decision and prompt_result.retrieval.routing_decision.reasoning:
-                    st.caption(f"Routing rationale: {prompt_result.retrieval.routing_decision.reasoning}")
-
-            st.caption(f"Answer generated in {answer_seconds:.2f} seconds.")
-            if llm_response is not None:
-                st.caption(str(llm_response.get_metadata()))
-
-            history_entry = {
-                "question": question,
-                "answer": response,
-                "citations": citations_text,
-                "vector_db": selected_vector_db,
-                "vector_dbs": selected_query_vector_dbs,
-                "chat_model": selected_model,
-                "provider": selected_provider,
-                "embedding_model": selected_embedding_model,
-                "response_type": response_type,
-                "retrieval_mode": retrieval_mode,
-                "source_grouping": source_grouping,
-                "selected_sources": prompt_result.retrieval.selected_sources,
-                "routing_reasoning": prompt_result.retrieval.routing_decision.reasoning if prompt_result.retrieval.routing_decision else "",
-                "answer_seconds": answer_seconds,
-            }
-            append_question_history(selected_vector_db, QUESTION_HISTORY_DIR, history_entry)
-            st.session_state["question_history"] = load_question_history(selected_vector_db, QUESTION_HISTORY_DIR)
+        history_entry = {
+            "question": question,
+            "answer": response,
+            "vector_db": selected_vector_db,
+            "chat_model": selected_model,
+            "provider": selected_provider,
+            "embedding_model": selected_embedding_model,
+            "response_type": response_type,
+            "answer_seconds": perf_counter() - start_time,
+        }
+        append_question_history(selected_vector_db, QUESTION_HISTORY_DIR, history_entry)
+        st.session_state["question_history"] = load_question_history(selected_vector_db, QUESTION_HISTORY_DIR)
 

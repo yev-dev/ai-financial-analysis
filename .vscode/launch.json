@@ -21,24 +21,24 @@
             "justMyCode": false
         },
         {
-        "name": "LiteLLM Dashboard",
-        "type": "debugpy",
-        "request": "launch",
-        "python": "${command:python.interpreterPath}",
-        "module": "streamlit",
-        "args": [
-            "run",
-            "dashboard/litellm_app.py",
-            "--server.port",
-            "${input:litellmDashboardPort}"
-        ],
-        "env": {
-            "VECTOR_DB_DIR": "${input:vectorDbPath}"
-        },
-        "cwd": "${workspaceFolder}",
-        "console": "integratedTerminal",
-        "justMyCode": false
-    }
+            "name": "LiteLLM Dashboard",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${command:python.interpreterPath}",
+            "module": "streamlit",
+            "args": [
+                "run",
+                "dashboard/litellm_app.py",
+                "--server.port",
+                "${input:litellmDashboardPort}"
+            ],
+            "env": {
+                "VECTOR_DB_DIR": "${input:vectorDbPath}"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        }
     ],
     "compounds": [
         {
@@ -50,12 +50,6 @@
         }
     ],
     "inputs": [
-        {
-            "id": "condaEnvName",
-            "type": "promptString",
-            "description": "Conda environment name",
-            "default": "ai_fin"
-        },
         {
             "id": "vectorDbPath",
             "type": "promptString",

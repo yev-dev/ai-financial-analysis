@@ -18,6 +18,9 @@ class ResponseMetadata:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    prompt_truncated: bool = False
+    prompt_tokens_before_guard: int | None = None
+    prompt_tokens_after_guard: int | None = None
     raw_response: Any = None
 
     def __str__(self) -> str:
@@ -35,6 +38,12 @@ class ResponseMetadata:
             lines.append(f"{'Completion Tokens':<{col}}{self.completion_tokens}")
         if self.total_tokens is not None:
             lines.append(f"{'Total Tokens':<{col}}{self.total_tokens}")
+        if self.prompt_truncated:
+            lines.append(f"{'Prompt Truncated':<{col}}yes")
+            if self.prompt_tokens_before_guard is not None:
+                lines.append(f"{'Prompt Tokens (Before Guard)':<{col}}{self.prompt_tokens_before_guard}")
+            if self.prompt_tokens_after_guard is not None:
+                lines.append(f"{'Prompt Tokens (After Guard)':<{col}}{self.prompt_tokens_after_guard}")
         return "\n".join(lines)
 
 
@@ -101,6 +110,12 @@ class MarkdownModelResponse(ModelResponse):
             lines.append(f"- **Completion Tokens:** {meta.completion_tokens}")
         if meta.total_tokens is not None:
             lines.append(f"- **Total Tokens:** {meta.total_tokens}")
+        if meta.prompt_truncated:
+            lines.append("- **Prompt Truncated:** yes")
+            if meta.prompt_tokens_before_guard is not None:
+                lines.append(f"- **Prompt Tokens (Before Guard):** {meta.prompt_tokens_before_guard}")
+            if meta.prompt_tokens_after_guard is not None:
+                lines.append(f"- **Prompt Tokens (After Guard):** {meta.prompt_tokens_after_guard}")
         lines.extend(["", "### Response", self.content or "<empty response>"])
         return "\n".join(lines)
 

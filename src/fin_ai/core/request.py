@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import os
+from copy import deepcopy
 from dataclasses import dataclass
 from contextlib import contextmanager
 from typing import Any, Type
 
 import litellm
+import tiktoken
 from litellm import completion
 from fin_ai.core.response import ConsoleModelResponse, ModelResponse, Provider, ResponseFactory, ResponseMetadata
 
 litellm.drop_params = True
+
+GPT5_INPUT_TOKEN_LIMIT = 4000
+GPT5_SAFE_INPUT_BUDGET = 3600
 
 
 @dataclass(slots=True)
@@ -19,6 +24,15 @@ class RequestPayload:
     temperature: float = 0.2
     max_tokens: int | None = None
     proxy_port: int | None = None
+    auto_truncate_prompt: bool = True
+
+
+@dataclass(slots=True)
+class PromptGuardResult:
+    messages: list[dict[str, str]]
+    truncated: bool = False
+    prompt_tokens_before: int | None = None
+    prompt_tokens_after: int | None = None
 
 
 class LiteLLMClient:
@@ -42,7 +56,7 @@ class LiteLLMClient:
 
     @contextmanager
     def _proxy_env(self, proxy_port: int | None):
-        """Temporarily set proxy env vars for LiteLLM HTTP calls."""
+        """Temporarily set proxy env vars for LiteLLM HTTP calls. Useful for per-request proxy configuration within a corporate network."""
         if not proxy_port:
             yield
             return
@@ -73,6 +87,18 @@ class LiteLLMClient:
             messages.append({"role": "system", "content": request.system_prompt})
         messages.append({"role": "user", "content": request.prompt})
 
+        if request.auto_truncate_prompt:
+            guard = _apply_model_input_guard(messages, self.model)
+        else:
+            current_tokens = sum(_count_tokens(str(message.get("content", ""))) for message in messages)
+            guard = PromptGuardResult(
+                messages=messages,
+                truncated=False,
+                prompt_tokens_before=current_tokens,
+                prompt_tokens_after=current_tokens,
+            )
+        messages = guard.messages
+
         call_args: dict[str, Any] = {
             "model": self.model,
             "api_base": self.api_base,
@@ -98,9 +124,83 @@ class LiteLLMClient:
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             completion_tokens=getattr(usage, "completion_tokens", None),
             total_tokens=getattr(usage, "total_tokens", None),
+            prompt_truncated=guard.truncated,
+            prompt_tokens_before_guard=guard.prompt_tokens_before,
+            prompt_tokens_after_guard=guard.prompt_tokens_after,
             raw_response=raw,
         )
         return response_class(content=choice.message.content or "", metadata=metadata)
+
+
+def _apply_model_input_guard(messages: list[dict[str, str]], model: str) -> PromptGuardResult:
+    """Trim oversized prompts for strict-input models (e.g. gpt-5) before API call."""
+    current_tokens = sum(_count_tokens(str(message.get("content", ""))) for message in messages)
+    if "gpt-5" not in model.lower():
+        return PromptGuardResult(messages=messages, prompt_tokens_before=current_tokens, prompt_tokens_after=current_tokens)
+
+    if current_tokens <= GPT5_SAFE_INPUT_BUDGET:
+        return PromptGuardResult(messages=messages, prompt_tokens_before=current_tokens, prompt_tokens_after=current_tokens)
+
+    adjusted = deepcopy(messages)
+    user_indexes = [idx for idx, msg in enumerate(adjusted) if msg.get("role") == "user"]
+    if not user_indexes:
+        return PromptGuardResult(messages=adjusted, prompt_tokens_before=current_tokens, prompt_tokens_after=current_tokens)
+
+    target_idx = user_indexes[-1]
+    other_tokens = sum(
+        _count_tokens(str(msg.get("content", "")))
+        for idx, msg in enumerate(adjusted)
+        if idx != target_idx
+    )
+    max_user_tokens = max(128, GPT5_SAFE_INPUT_BUDGET - other_tokens)
+
+    original_user_text = str(adjusted[target_idx].get("content", ""))
+    trimmed_user_text = _trim_text_to_tokens(original_user_text, max_user_tokens)
+    truncated = trimmed_user_text != original_user_text
+    if truncated:
+        trimmed_user_text += "\n\n[Prompt truncated to fit gpt-5 input limit.]"
+    adjusted[target_idx]["content"] = trimmed_user_text
+    after_tokens = sum(_count_tokens(str(message.get("content", ""))) for message in adjusted)
+    return PromptGuardResult(
+        messages=adjusted,
+        truncated=truncated,
+        prompt_tokens_before=current_tokens,
+        prompt_tokens_after=after_tokens,
+    )
+
+
+def _count_tokens(text: str) -> int:
+    if not text:
+        return 0
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text))
+    except Exception:
+        # Fallback heuristic: roughly 4 characters per token for English prose.
+        return max(1, len(text) // 4)
+
+
+def _trim_text_to_tokens(text: str, max_tokens: int) -> str:
+    if max_tokens <= 0:
+        return ""
+    if _count_tokens(text) <= max_tokens:
+        return text
+
+    left = 0
+    right = len(text)
+    best = ""
+
+    while left <= right:
+        mid = (left + right) // 2
+        candidate = text[:mid]
+        token_count = _count_tokens(candidate)
+        if token_count <= max_tokens:
+            best = candidate
+            left = mid + 1
+        else:
+            right = mid - 1
+
+    return best.rstrip()
 
 
 class ModelRequest:

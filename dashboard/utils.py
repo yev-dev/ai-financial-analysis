@@ -3,6 +3,7 @@ import os
 import json
 import math
 import re
+import shutil
 import statistics
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -145,6 +146,29 @@ def append_question_history(
 
 def clear_question_history(vector_db_name: str, history_dir: Path) -> None:
     save_question_history(vector_db_name, history_dir, [])
+
+
+def purge_vector_db_assets(vector_db_name: str, vector_db_dir: Path, history_dir: Path) -> list[Path]:
+    deleted_paths: list[Path] = []
+
+    candidates = [
+        Path(vector_db_dir) / f"{vector_db_name}.faiss",
+        Path(vector_db_dir) / f"{vector_db_name}.pdf",
+        Path(vector_db_dir) / f"{vector_db_name}.embedding.json",
+        Path(vector_db_dir) / vector_db_name / "images",
+        get_question_history_path(vector_db_name, Path(history_dir)),
+    ]
+
+    for path in candidates:
+        if not path.exists():
+            continue
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+        deleted_paths.append(path)
+
+    return deleted_paths
 
 
 def extract_python_code(response_text: str) -> str:

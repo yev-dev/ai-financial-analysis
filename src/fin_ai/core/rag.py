@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import tempfile
 import warnings
@@ -30,6 +31,44 @@ import html2text
 from docx import Document as WordDocument
 
 from dashboard import DEFAULT_CHAT_MODEL, OLLAMA_BASE_URL, VECTOR_DB_DIR
+
+
+def _embedding_metadata_path(filename: str) -> Path:
+    return Path(VECTOR_DB_DIR) / f"{filename}.embedding.json"
+
+
+def save_embedding_metadata(filename: str, provider: str, model: str, base_url: str) -> Path:
+    metadata_path = _embedding_metadata_path(filename)
+    metadata = {
+        "provider": provider,
+        "model": model,
+        "base_url": base_url.rstrip("/"),
+    }
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=True, indent=2), encoding="utf-8")
+    return metadata_path
+
+
+def load_embedding_metadata(filename: str) -> dict[str, str] | None:
+    metadata_path = _embedding_metadata_path(filename)
+    if not metadata_path.exists():
+        return None
+
+    try:
+        raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    provider = str(raw.get("provider", "")).strip()
+    model = str(raw.get("model", "")).strip()
+    base_url = str(raw.get("base_url", "")).strip().rstrip("/")
+    if not provider or not model or not base_url:
+        return None
+
+    return {
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+    }
 
 
 def _load_and_convert_with_pymupdf(file_path):
