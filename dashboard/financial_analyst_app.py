@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import warnings
+from hashlib import md5
 from pathlib import Path
 from time import perf_counter
 from urllib.error import URLError
@@ -42,26 +43,44 @@ from dashboard import (
 )
 
 
+from fin_ai.core.query import (
+    build_source_retriever_configs,
+    format_source_citations,
+    query_with_multi_source_prompting,
+)
 from fin_ai.core.rag import (
+    _create_source_metadata,
     create_or_load_vector_store,
     get_markdown_splits,
     load_embedding_metadata,
     load_and_convert_document,
     save_embedding_metadata,
 )
-from fin_ai.core.request import ModelRequest, RequestPayload
 from dashboard.utils import (
     append_question_history,
     clear_question_history,
     execute_python_code,
     extract_python_code,
     get_embeddings,
-    load_local_model_options,
     load_question_history,
     purge_vector_db_assets,
     render_pdf_pages,
+    render_csv_thumbnail,
     sanitize_generated_python_code,
 )
+
+st.set_page_config(page_title="Financial Data Analysis", layout="wide")
+
+SIDEBAR_PREVIEW_WIDTH = 320
+
+# Default GPT family models
+DEFAULT_GITHUB_MODELS = [
+    "gpt-4o",
+    "gpt-4-turbo",
+    "gpt-4",
+    "gpt-4-32k",
+    "gpt-3.5-turbo",
+]
 
 
 def render_response_output(response_text: str, response_type: str, panel_key: str) -> None:
@@ -100,9 +119,20 @@ def render_response_output(response_text: str, response_type: str, panel_key: st
     st.markdown(response_text.replace('$', '\\$'))
 
 
+def render_source_citations(citations_text: str | None, response_type: str) -> None:
+    if not citations_text:
+        return
+
+    st.caption("Source-level citations")
+    if response_type == "Plain Text":
+        st.text(citations_text)
+    else:
+        st.markdown(citations_text.replace('$', '\\$'))
+
+
 def render_pyodide_runner(initial_code: str, panel_key: str) -> None:
-        code_json = json.dumps(initial_code)
-        html = f"""
+    code_json = json.dumps(initial_code)
+    html = f"""
 <div style=\"font-family: ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid #ddd; border-radius: 8px; padding: 10px;\">
     <div style=\"font-family: system-ui, -apple-system, Segoe UI, sans-serif; font-size: 14px; margin-bottom: 8px;\">
         A WebAssembly-powered Python kernel backed by Pyodide
@@ -167,7 +197,7 @@ def render_pyodide_runner(initial_code: str, panel_key: str) -> None:
     }};
 </script>
 """
-        components.html(html, height=460, scrolling=True)
+    components.html(html, height=460, scrolling=True)
 
 
 @st.cache_data(ttl=10)
@@ -213,14 +243,86 @@ def get_github_model_options(github_token: str) -> tuple[list[str], str | None]:
 def display_pdf_in_sidebar(pdf_path, file_name):
     try:
         images_folder = Path(VECTOR_DB_DIR) / file_name / "images"
-        image_paths = render_pdf_pages(pdf_path, images_folder, zoom=1.5)
+        source_path = Path(pdf_path)
+        source_mtime = source_path.stat().st_mtime if source_path.exists() else 0.0
+        image_paths = get_cached_pdf_page_paths(
+            str(source_path),
+            str(images_folder),
+            zoom=1.5,
+            source_mtime=source_mtime,
+        )
         for page_index, img_path in enumerate(image_paths, start=1):
-            st.sidebar.image(str(img_path), caption=f"Page {page_index}", width="stretch")
+            st.sidebar.image(str(img_path), caption=f"Page {page_index}", width=SIDEBAR_PREVIEW_WIDTH)
     except Exception as e:
         st.sidebar.error(f"Error loading PDF: {str(e)}")
 
+
+# Function to display CSV content as thumbnail in the sidebar
+def display_csv_in_sidebar(csv_path, file_name):
+    try:
+        images_folder = Path(VECTOR_DB_DIR) / file_name / "images"
+        source_path = Path(csv_path)
+        source_mtime = source_path.stat().st_mtime if source_path.exists() else 0.0
+        image_path = get_cached_csv_thumbnail_path(
+            str(source_path),
+            str(images_folder),
+            source_mtime=source_mtime,
+        )
+        if image_path:
+            st.sidebar.image(image_path, caption="CSV Preview", width=SIDEBAR_PREVIEW_WIDTH)
+        else:
+            st.sidebar.info("Could not generate CSV preview.")
+    except Exception as e:
+        st.sidebar.error(f"Error loading CSV preview: {str(e)}")
+
+
+@st.cache_data(show_spinner=False)
+def get_cached_csv_thumbnail_path(
+    csv_path: str,
+    images_folder: str,
+    source_mtime: float,
+) -> str:
+    # source_mtime is intentionally included to invalidate the cache on file changes.
+    del source_mtime
+    image_path = render_csv_thumbnail(csv_path, images_folder)
+    return image_path
+
+
+@st.cache_data(show_spinner=False)
+def get_cached_pdf_page_paths(
+    pdf_path: str,
+    images_folder: str,
+    zoom: float,
+    source_mtime: float,
+) -> tuple[str, ...]:
+    # source_mtime is intentionally included to invalidate the cache on file changes.
+    del source_mtime
+    image_paths = render_pdf_pages(pdf_path, images_folder, zoom=zoom)
+    return tuple(str(path) for path in image_paths)
+
+
+SUPPORTED_UPLOAD_TYPES = ["pdf", "csv", "json", "html", "docx"]
+SUPPORTED_SOURCE_SUFFIXES = [".pdf", ".csv", ".json", ".html", ".docx"]
+
+
+def find_source_document(vector_db_name: str) -> Path | None:
+    for suffix in SUPPORTED_SOURCE_SUFFIXES:
+        candidate = Path(VECTOR_DB_DIR) / f"{vector_db_name}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 # Streamlit title and layout
 st.title("Financial Data Analysis")
+
+# Discover vector stores grouped by source early so we can switch the UI for upload mode.
+source_vector_stores = discover_vector_stores_by_source(VECTOR_DB_DIR)
+# Only show entries that have a corresponding source document file (pdf, csv, etc.)
+vector_db_names = [name for name in source_vector_stores if find_source_document(name) is not None]
+vector_db_options = vector_db_names + ["Upload New Document"]
+selected_vector_db = st.selectbox("Select Vector DB or Upload New Document", vector_db_options, index=0)
+is_upload_mode = selected_vector_db == "Upload New Document"
 
 available_chat_models, available_embedding_models, model_load_error = get_local_model_options()
 
@@ -233,64 +335,41 @@ selected_provider_label = st.selectbox("Select Provider", list(provider_label_to
 selected_provider = provider_label_to_key[selected_provider_label]
 github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
 
-if selected_provider == "ollama":
-    default_model_index = (
-        available_chat_models.index(DEFAULT_CHAT_MODEL)
-        if DEFAULT_CHAT_MODEL in available_chat_models
-        else 0
-    )
-    selected_model = st.selectbox(
-        "Select Local Ollama Model",
-        available_chat_models,
-        index=default_model_index,
-    )
-else:
-    github_token = st.text_input(
-        "GitHub Token",
-        value=os.getenv("GITHUB_TOKEN", ""),
-        type="password",
-    )
-    github_model_options, github_model_error = get_github_model_options(github_token)
-    default_github_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
-    default_github_index = (
-        github_model_options.index(default_github_model)
-        if default_github_model in github_model_options
-        else 0
-    )
-    selected_model = st.selectbox(
-        "Select GitHub Model",
-        github_model_options,
-        index=default_github_index,
-    )
-    if github_model_error:
-        st.warning(github_model_error)
-        selected_model = st.text_input(
-            "Or Enter GitHub Model Manually",
-            value=selected_model,
+if is_upload_mode:
+    if selected_provider == "github":
+        github_token = st.text_input(
+            "GitHub Token",
+            value=os.getenv("GITHUB_TOKEN", ""),
+            type="password",
         )
-
-    github_endpoint = st.text_input(
-            "GitHub Endpoint",
-            value=os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference"),
-        )
-    github_embedding_endpoint = st.text_input(
-            "GitHub Embedding Endpoint",
+        github_embedding_endpoint = st.text_input(
+            "Embedding Endpoint",
             value=os.getenv("GITHUB_EMBEDDING_BASE_URL", GITHUB_EMBEDDING_BASE_URL),
         )
+        available_embedding_models_display = [DEFAULT_GITHUB_EMBEDDING_MODEL, "openai/text-embedding-3-large"]
+        default_embedding_index = 0
+    else:
+        github_token = os.getenv("GITHUB_TOKEN", "").strip()
+        github_embedding_endpoint = st.text_input(
+            "Embedding Endpoint",
+            value=OLLAMA_BASE_URL,
+        )
+        available_embedding_models_display = available_embedding_models
+        default_embedding_index = (
+            available_embedding_models.index(DEFAULT_EMBEDDING_MODEL)
+            if DEFAULT_EMBEDDING_MODEL in available_embedding_models
+            else 0
+        )
 
-
-# Embedding model selection (label changes based on provider)
-if selected_provider == "github":
-    github_embedding_models = [DEFAULT_GITHUB_EMBEDDING_MODEL, "openai/text-embedding-3-large"]
-    default_embedding_index = 0
-    available_embedding_models_display = github_embedding_models
-else:
-    github_embedding_endpoint = OLLAMA_BASE_URL
-    available_embedding_models_display = available_embedding_models
-    default_embedding_index = (
-        available_embedding_models.index(DEFAULT_EMBEDDING_MODEL)
-        if DEFAULT_EMBEDDING_MODEL in available_embedding_models
-        else 0
+    selected_embedding_model = st.selectbox(
+        "Select Embedding Model",
+        available_embedding_models_display,
+        index=default_embedding_index,
+    )
+    selected_source_type = st.selectbox(
+        "Type of Source Document",
+        SUPPORTED_UPLOAD_TYPES,
+        index=0,
     )
 embedding_label = "Select Embedding Model" if selected_provider == "github" else "Select Local Embedding Model"
 selected_embedding_model = st.selectbox(
@@ -383,39 +462,45 @@ with st.expander("Previous Questions", expanded=False):
                 st.session_state["question_input"] = item["question"]
                 st.rerun()
 
-# If 'Upload New Document' is selected, show the file uploader
-if selected_vector_db == "Upload New Document":
-    uploaded_file = st.file_uploader("Upload a PDF file for analysis", type=["pdf"])
+    uploaded_file = st.file_uploader(
+        "Upload a document for analysis",
+        type=SUPPORTED_UPLOAD_TYPES,
+    )
 
-    # Process the uploaded PDF
     if uploaded_file:
-        st.sidebar.subheader("Uploaded PDF")
+        document_binary = uploaded_file.getvalue()
+        upload_hash = md5(document_binary).hexdigest()
+        document_suffix = Path(uploaded_file.name).suffix.lower()
+        st.sidebar.subheader("Uploaded Document")
         st.sidebar.write(uploaded_file.name)
 
-        # Save the PDF file temporarily and display it
-        temp_path = f"temp_{uploaded_file.name}"
-        document_binary = uploaded_file.read()
-        with open(temp_path, "wb") as f:
-            f.write(document_binary)
+        temp_upload_dir = Path(VECTOR_DB_DIR) / "_temp_uploads"
+        temp_upload_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = temp_upload_dir / f"{upload_hash}{document_suffix}"
+        if not temp_path.exists():
+            temp_path.write_bytes(document_binary)
 
-        # Display PDF in the sidebar (show all pages)
-        display_pdf_in_sidebar(temp_path, uploaded_file.name.split('.')[0])
+        if document_suffix == ".pdf":
+            display_pdf_in_sidebar(str(temp_path), uploaded_file.name.split('.')[0])
+        elif document_suffix == ".csv":
+            display_csv_in_sidebar(str(temp_path), uploaded_file.name.split('.')[0])
+        else:
+            st.sidebar.info(f"Preview is not available for {document_suffix} files.")
 
-        # PDF processing button
-        if st.button("Process PDF and Store in Vector DB"):
+        if st.button("Process Document and Store in Vector DB"):
             with st.spinner("Processing document..."):
                 start_time = perf_counter()
-
-                # Convert PDF to markdown directly
                 markdown_content = load_and_convert_document(temp_path)
-                chunks = get_markdown_splits(markdown_content)
+                document_metadata = _create_source_metadata(temp_path, selected_source_type)
+                document_metadata["source"] = uploaded_file.name
+                document_metadata["filename"] = uploaded_file.name
+                document_metadata["source_type"] = selected_source_type
+                document_metadata["file_size"] = len(document_binary)
+                chunks = get_markdown_splits(markdown_content, metadata=document_metadata)
 
-
-                # Initialize embeddings based on provider
                 embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
                 embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
 
-                # Create or load vector DB and store PDF along with it
                 vector_store = create_or_load_vector_store(uploaded_file.name.split(".")[0], chunks, embeddings)
                 save_embedding_metadata(
                     uploaded_file.name.split(".")[0],
@@ -426,22 +511,18 @@ if selected_vector_db == "Upload New Document":
 
                 # Ensure vector DB and PDF are stored correctly
                 vector_db_path = Path(VECTOR_DB_DIR) / f"{uploaded_file.name.split('.')[0]}.faiss"
-                vector_store.save_local(str(vector_db_path))  # Save FAISS vector store
+                vector_store.save_local(str(vector_db_path))
 
-                # Store the PDF file alongside the vector DB
-                pdf_path = Path(VECTOR_DB_DIR) / f"{uploaded_file.name}"
-                with open(pdf_path, "wb") as f:
+                source_path = Path(VECTOR_DB_DIR) / uploaded_file.name
+                with open(source_path, "wb") as f:
                     f.write(document_binary)
 
-                st.success("PDF processed and stored in the vector database.")
+                st.success("Document processed and stored in the vector database.")
                 st.caption(
                     f"Document processing completed in {perf_counter() - start_time:.2f} seconds."
                 )
 
-                # Clean up the temporary file
-                Path(temp_path).unlink()
-
-                # Refresh dashboard state so new vector DB appears immediately.
+                temp_path.unlink(missing_ok=True)
                 st.rerun()
 
 elif selected_vector_db != "Upload New Document":
@@ -472,18 +553,215 @@ elif selected_vector_db != "Upload New Document":
         if pdf_path.exists():
             display_pdf_in_sidebar(pdf_path, selected_vector_db)
         else:
-            st.sidebar.warning("PDF file not found for the selected vector DB.")
+            display_model_options = github_model_options
+        
+        default_github_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
+        default_github_index = (
+            display_model_options.index(default_github_model)
+            if default_github_model in display_model_options
+            else 0
+        )
+        selected_model = st.selectbox(
+            "Select GitHub Model",
+            display_model_options,
+            index=default_github_index,
+        )
+        if github_model_error:
+            st.warning(github_model_error)
+            selected_model = st.text_input(
+                "Or Enter GitHub Model Manually",
+                value=selected_model,
+            )
+
+        github_endpoint = st.text_input(
+            "GitHub Endpoint",
+            value=os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference"),
+        )
+        github_embedding_endpoint = st.text_input(
+            "GitHub Embedding Endpoint",
+            value=os.getenv("GITHUB_EMBEDDING_BASE_URL", GITHUB_EMBEDDING_BASE_URL),
+        )
+
+    # Embedding model selection (label changes based on provider)
+    if selected_provider == "github":
+        github_embedding_models = [DEFAULT_GITHUB_EMBEDDING_MODEL, "openai/text-embedding-3-large"]
+        default_embedding_index = 0
+        available_embedding_models_display = github_embedding_models
     else:
+        github_embedding_endpoint = OLLAMA_BASE_URL
+        available_embedding_models_display = available_embedding_models
+        default_embedding_index = (
+            available_embedding_models.index(DEFAULT_EMBEDDING_MODEL)
+            if DEFAULT_EMBEDDING_MODEL in available_embedding_models
+            else 0
+        )
+    embedding_label = "Select Embedding Model" if selected_provider == "github" else "Select Local Embedding Model"
+    selected_embedding_model = st.selectbox(
+        embedding_label,
+        available_embedding_models_display,
+        index=default_embedding_index,
+    )
+
+    response_type = st.selectbox(
+        "Select Response Type",
+        ["Plain Text", "Markdown", "Python Code"],
+        index=1,
+    )
+
+    if model_load_error:
+        st.warning(model_load_error)
+
+    st.caption(
+        "Use the same embedding model that was used when the vector DB was created."
+    )
+
+
+selected_query_vector_dbs: list[str] = []
+retrieval_mode = "ensemble"
+source_grouping = "vector_db"
+use_llm_query_planner = False
+max_routed_sources = 1
+vector_store = None
+loaded_vector_stores: dict[str, FAISS] = {}
+query_source_configs = []
+selected_source_names: list[str] = []
+
+history_vector_db = selected_vector_db if selected_vector_db != "Upload New Document" else "__upload__"
+if st.session_state.get("history_vector_db") != history_vector_db:
+    st.session_state["history_vector_db"] = history_vector_db
+    st.session_state["question_history"] = load_question_history(history_vector_db, QUESTION_HISTORY_DIR)
+
+if selected_vector_db != "Upload New Document":
+    with st.expander("Previous Questions", expanded=False):
+        history = st.session_state.get("question_history", [])
+        if not history:
+            st.caption("No saved question history yet for this vector DB.")
+        else:
+            if st.button("Clear History", key=f"clear_history_{history_vector_db}"):
+                clear_question_history(history_vector_db, QUESTION_HISTORY_DIR)
+                st.session_state["question_history"] = []
+                st.rerun()
+
+            for index, item in enumerate(history[:10], start=1):
+                st.markdown(f"**Q:** {item['question']}")
+                st.caption(
+                    f"Model: {item['chat_model']} | Embedding: {item['embedding_model']} | "
+                    f"Type: {item.get('response_type', 'Markdown')} | "
+                    f"Mode: {item.get('retrieval_mode', 'ensemble')} | Time: {item['answer_seconds']:.2f}s"
+                )
+                if item.get("answer"):
+                    render_response_output(
+                        item["answer"],
+                        item.get("response_type", "Markdown"),
+                        panel_key=f"history_{history_vector_db}_{index}",
+                    )
+                    render_source_citations(item.get("citations"), item.get("response_type", "Markdown"))
+                if st.button("Reuse Question", key=f"reuse_question_{history_vector_db}_{index}"):
+                    st.session_state["question_input"] = item["question"]
+                    st.rerun()
+
+if selected_vector_db != "Upload New Document":
+    selected_query_vector_dbs = st.multiselect(
+        "Query Vector DB Sources",
+        vector_db_names,
+        default=[selected_vector_db],
+    )
+    if not selected_query_vector_dbs:
+        selected_query_vector_dbs = [selected_vector_db]
+    if selected_vector_db not in selected_query_vector_dbs:
+        selected_query_vector_dbs = [selected_vector_db] + selected_query_vector_dbs
+
+    retrieval_mode = st.selectbox(
+        "Retrieval Mode",
+        ["ensemble", "separate", "routed"],
+        index=0,
+    )
+    source_grouping = st.selectbox(
+        "Group Sources By",
+        ["vector_db", "filename", "source_type", "source"],
+        index=0,
+    )
+    use_llm_query_planner = st.checkbox(
+        "Use LLM query planner for routed mode",
+        value=True,
+        disabled=retrieval_mode != "routed",
+    )
+    max_routed_sources = st.slider(
+        "Max Routed Sources",
+        min_value=1,
+        max_value=max(1, len(selected_query_vector_dbs) * 4),
+        value=min(max(1, len(selected_query_vector_dbs)), max(1, len(selected_query_vector_dbs) * 4)),
+        disabled=retrieval_mode != "routed",
+    )
+
+    embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
+    embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
+
+    for query_vector_db in selected_query_vector_dbs:
+        if query_vector_db in source_vector_stores:
+            query_vector_db_path = source_vector_stores[query_vector_db]
+            if query_vector_db_path.exists():
+                # FAISS.load_local expects a directory; if the discovered path is the
+                # .faiss file itself, use its parent directory instead.
+                faiss_load_dir = (
+                    str(query_vector_db_path.parent)
+                    if query_vector_db_path.is_file()
+                    else str(query_vector_db_path)
+                )
+                loaded_vector_stores[query_vector_db] = FAISS.load_local(
+                    faiss_load_dir,
+                    embeddings=embeddings,
+                    allow_dangerous_deserialization=True,
+                )
+
+    vector_store = loaded_vector_stores.get(selected_vector_db)
+    if vector_store is None:
         st.sidebar.warning(f"Vector DB '{selected_vector_db}' not found.")
+    else:
+        source_document = find_source_document(selected_vector_db)
+        if source_document and source_document.suffix.lower() == ".pdf":
+            display_pdf_in_sidebar(source_document, selected_vector_db)
+        elif source_document:
+            st.sidebar.info(f"Source document: {source_document.name}")
+        else:
+            st.sidebar.warning("Source document not found for the selected vector DB.")
 
-# Question input section
-question = st.text_input(
-    "Enter your question:",
-    placeholder="e.g., What is the company's revenue for the quarter?",
-    key="question_input",
-)
+        for query_vector_db, query_vector_store in loaded_vector_stores.items():
+            query_source_configs.extend(
+                build_source_retriever_configs(
+                    query_vector_store,
+                    base_name=query_vector_db,
+                    group_by=source_grouping,
+                    search_k=5,
+                )
+            )
 
-submit_clicked = st.button("Submit Question")
+        if not query_source_configs:
+            query_source_configs = build_source_retriever_configs(
+                vector_store,
+                base_name=selected_vector_db,
+                group_by="vector_db",
+                search_k=5,
+            )
+
+        available_source_names = [config.name for config in query_source_configs]
+        selected_source_names = st.multiselect(
+            "Restrict to Source Groups",
+            available_source_names,
+            default=available_source_names,
+        )
+
+# Question input section (hidden while uploading a new document)
+question = ""
+submit_clicked = False
+if selected_vector_db != "Upload New Document":
+    question = st.text_input(
+        "Enter your question:",
+        placeholder="e.g., What is the company's revenue for the quarter?",
+        key="question_input",
+    )
+
+    submit_clicked = st.button("Submit Question")
 
 latest_response = st.session_state.get("latest_response")
 if latest_response and not submit_clicked:
@@ -493,47 +771,40 @@ if latest_response and not submit_clicked:
         latest_response.get("response_type", "Markdown"),
         panel_key="latest_response",
     )
+    render_source_citations(
+        latest_response.get("citations"),
+        latest_response.get("response_type", "Markdown"),
+    )
 
 # Button to process and generate answers
 if submit_clicked and question and selected_vector_db != "Upload New Document":
-    with st.spinner("Answering your question..."):
-        start_time = perf_counter()
+    active_source_configs = [
+        config for config in query_source_configs
+        if not selected_source_names or config.name in selected_source_names
+    ]
+    if not active_source_configs:
+        st.error("Select at least one source group before submitting a question.")
+    else:
+        with st.spinner("Answering your question..."):
+            start_time = perf_counter()
 
-        # Build retriever from the selected vector store
-        retriever = vector_store.as_retriever(search_type="mmr", search_kwargs={'k': 5})
+            if selected_provider == "github":
+                if not github_token:
+                    st.error("GitHub Token is required when GitHub Models provider is selected.")
+                    st.stop()
+                os.environ["GITHUB_TOKEN"] = github_token
+                os.environ["GITHUB_MODEL"] = selected_model
+                os.environ["GITHUB_ENDPOINT"] = github_endpoint
+            else:
+                os.environ["OLLAMA_MODEL"] = selected_model
+                os.environ["OLLAMA_ENDPOINT"] = OLLAMA_BASE_URL
 
-        docs = retriever.invoke(question)
-        context = "\n\n".join(doc.page_content for doc in docs)
-
-        prompt = f"""
-You are an assistant for financial data analysis. Use the retrieved context to answer questions.
-If you don't know the answer, say so.
-
-Response format requirement: {response_type}
-Formatting rules:
-- Plain Text: respond with plain text only. Do not use markdown lists, headings, or code fences.
-- Markdown: respond using clear markdown formatting.
-- Python Code: respond with Python code only inside a single fenced python code block, with no extra explanation outside the code block.
-
-Question: {question}
-Context: {context}
-Answer:
-""".strip()
-
-        if selected_provider == "github":
-            if not github_token:
-                st.error("GitHub Token is required when GitHub Models provider is selected.")
-                st.stop()
-            os.environ["GITHUB_TOKEN"] = github_token
-            os.environ["GITHUB_MODEL"] = selected_model
-            os.environ["GITHUB_ENDPOINT"] = github_endpoint
-        else:
-            os.environ["OLLAMA_MODEL"] = selected_model
-            os.environ["OLLAMA_ENDPOINT"] = OLLAMA_BASE_URL
-
-        llm_response = ModelRequest(provider=selected_provider, format="text").request(
-            RequestPayload(
-                prompt=prompt,
+            prompt_result = query_with_multi_source_prompting(
+                question,
+                active_source_configs,
+                provider=selected_provider,
+                response_format="text",
+                mode=retrieval_mode,
                 system_prompt="You are a concise financial analysis assistant.",
                 temperature=0.2,
                 auto_truncate_prompt=bool(auto_truncate_prompt),

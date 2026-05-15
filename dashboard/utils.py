@@ -50,6 +50,62 @@ def render_pdf_pages(file_path, output_dir, zoom=1.5):
     return image_paths
 
 
+def render_csv_thumbnail(file_path: str, output_dir: str) -> str:
+    """Generate a thumbnail image from a CSV file showing the first few rows."""
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    image_path = output_path / "preview.png"
+    
+    if image_path.exists():
+        return str(image_path)
+    
+    try:
+        # Read CSV file
+        df = pd.read_csv(file_path, nrows=10)
+        
+        # Create figure and axis
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.axis('tight')
+        ax.axis('off')
+        
+        # Display table with limited rows
+        table = ax.table(
+            cellText=df.head(8).values,
+            colLabels=df.columns,
+            cellLoc='left',
+            loc='center',
+            colWidths=[min(20, len(str(col)) * 1.2) / 100 for col in df.columns]
+        )
+        
+        table.auto_set_font_size(False)
+        table.set_fontsize(8)
+        table.scale(1, 1.5)
+        
+        # Style header
+        for i in range(len(df.columns)):
+            table[(0, i)].set_facecolor('#4CAF50')
+            table[(0, i)].set_text_props(weight='bold', color='white')
+        
+        # Alternate row colors
+        for i in range(1, min(9, len(df) + 1)):
+            for j in range(len(df.columns)):
+                if i % 2 == 0:
+                    table[(i, j)].set_facecolor('#f0f0f0')
+                else:
+                    table[(i, j)].set_facecolor('#ffffff')
+        
+        # Save figure
+        plt.tight_layout()
+        fig.savefig(image_path, dpi=100, bbox_inches='tight')
+        plt.close(fig)
+        
+        return str(image_path)
+    except Exception as e:
+        # Return an error indicator or empty path
+        print(f"Error generating CSV thumbnail: {e}")
+        return ""
+
+
 def get_question_history_path(vector_db_name: str, history_dir: Path) -> Path:
     sanitized_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", vector_db_name).strip("_")
     if not sanitized_name:
@@ -70,6 +126,7 @@ def load_question_history(vector_db_name: str, history_dir: Path) -> list[dict[s
 
 def save_question_history(vector_db_name: str, history_dir: Path, history: list[dict[str, Any]]) -> None:
     history_path = get_question_history_path(vector_db_name, history_dir)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
     history_path.write_text(
         json.dumps(history, ensure_ascii=True, indent=2),
         encoding="utf-8",

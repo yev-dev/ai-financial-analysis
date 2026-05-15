@@ -2,10 +2,15 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 BASE_DIR = Path(__file__).resolve().parent
 PARENT_DIR = BASE_DIR.parent
 SRC_DIR = PARENT_DIR / "src"
+
+# Load project-level .env without overriding already-exported environment variables.
+load_dotenv(PARENT_DIR / ".env", override=False)
 
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
