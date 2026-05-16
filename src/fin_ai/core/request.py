@@ -25,11 +25,13 @@ class RequestPayload:
     max_tokens: int | None = None
     proxy_port: int | None = None
     auto_truncate_prompt: bool = True
+    tools: list[dict[str, Any]] | None = None
+    messages: list[dict[str, Any]] | None = None
 
 
 @dataclass(slots=True)
 class PromptGuardResult:
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]
     truncated: bool = False
     prompt_tokens_before: int | None = None
     prompt_tokens_after: int | None = None
@@ -82,10 +84,13 @@ class LiteLLMClient:
         request: RequestPayload,
         response_class: Type[ModelResponse] = ConsoleModelResponse,
     ) -> ModelResponse:
-        messages = []
-        if request.system_prompt:
-            messages.append({"role": "system", "content": request.system_prompt})
-        messages.append({"role": "user", "content": request.prompt})
+        if request.messages is not None:
+            messages = list(request.messages)
+        else:
+            messages = []
+            if request.system_prompt:
+                messages.append({"role": "system", "content": request.system_prompt})
+            messages.append({"role": "user", "content": request.prompt})
 
         if request.auto_truncate_prompt:
             guard = _apply_model_input_guard(messages, self.model)
@@ -105,6 +110,8 @@ class LiteLLMClient:
             "messages": messages,
             "temperature": request.temperature,
         }
+        if request.tools is not None:
+            call_args["tools"] = request.tools
         if self.api_key is not None:
             call_args["api_key"] = self.api_key
         if request.max_tokens is not None:
