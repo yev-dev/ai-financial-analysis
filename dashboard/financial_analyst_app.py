@@ -51,6 +51,7 @@ from fin_ai.core.query import (
 from fin_ai.core.rag import (
     _create_source_metadata,
     create_or_load_vector_store,
+    discover_vector_stores_by_source,
     get_markdown_splits,
     load_embedding_metadata,
     load_and_convert_document,
@@ -334,38 +335,68 @@ provider_label_to_key = {
 selected_provider_label = st.selectbox("Select Provider", list(provider_label_to_key.keys()), index=0)
 selected_provider = provider_label_to_key[selected_provider_label]
 github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
+github_model_error = None
+
+if selected_provider == "github":
+    github_token = st.text_input(
+        "GitHub Token",
+        value=os.getenv("GITHUB_TOKEN", ""),
+        type="password",
+    )
+    display_model_options, github_model_error = get_github_model_options(github_token)
+    default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
+    default_chat_index = (
+        display_model_options.index(default_chat_model)
+        if default_chat_model in display_model_options
+        else 0
+    )
+    selected_model = st.selectbox(
+        "Select GitHub Model",
+        display_model_options,
+        index=default_chat_index,
+    )
+    if github_model_error:
+        st.warning(github_model_error)
+        selected_model = st.text_input(
+            "Or Enter GitHub Model Manually",
+            value=selected_model,
+        )
+
+    github_endpoint = st.text_input(
+        "GitHub Endpoint",
+        value=github_endpoint,
+    )
+    github_embedding_endpoint = st.text_input(
+        "Embedding Endpoint",
+        value=os.getenv("GITHUB_EMBEDDING_BASE_URL", GITHUB_EMBEDDING_BASE_URL),
+    )
+    available_embedding_models_display = [
+        DEFAULT_GITHUB_EMBEDDING_MODEL,
+        "openai/text-embedding-3-large",
+    ]
+    default_embedding_index = 0
+else:
+    github_token = os.getenv("GITHUB_TOKEN", "").strip()
+    default_chat_model = os.getenv("OLLAMA_MODEL", DEFAULT_CHAT_MODEL)
+    default_chat_index = (
+        available_chat_models.index(default_chat_model)
+        if default_chat_model in available_chat_models
+        else 0
+    )
+    selected_model = st.selectbox(
+        "Select Local Chat Model",
+        available_chat_models,
+        index=default_chat_index,
+    )
+    github_embedding_endpoint = OLLAMA_BASE_URL
+    available_embedding_models_display = available_embedding_models
+    default_embedding_index = (
+        available_embedding_models.index(DEFAULT_EMBEDDING_MODEL)
+        if DEFAULT_EMBEDDING_MODEL in available_embedding_models
+        else 0
+    )
 
 if is_upload_mode:
-    if selected_provider == "github":
-        github_token = st.text_input(
-            "GitHub Token",
-            value=os.getenv("GITHUB_TOKEN", ""),
-            type="password",
-        )
-        github_embedding_endpoint = st.text_input(
-            "Embedding Endpoint",
-            value=os.getenv("GITHUB_EMBEDDING_BASE_URL", GITHUB_EMBEDDING_BASE_URL),
-        )
-        available_embedding_models_display = [DEFAULT_GITHUB_EMBEDDING_MODEL, "openai/text-embedding-3-large"]
-        default_embedding_index = 0
-    else:
-        github_token = os.getenv("GITHUB_TOKEN", "").strip()
-        github_embedding_endpoint = st.text_input(
-            "Embedding Endpoint",
-            value=OLLAMA_BASE_URL,
-        )
-        available_embedding_models_display = available_embedding_models
-        default_embedding_index = (
-            available_embedding_models.index(DEFAULT_EMBEDDING_MODEL)
-            if DEFAULT_EMBEDDING_MODEL in available_embedding_models
-            else 0
-        )
-
-    selected_embedding_model = st.selectbox(
-        "Select Embedding Model",
-        available_embedding_models_display,
-        index=default_embedding_index,
-    )
     selected_source_type = st.selectbox(
         "Type of Source Document",
         SUPPORTED_UPLOAD_TYPES,
@@ -398,12 +429,7 @@ st.caption(
 )
 
 
-# Dropdown to select vector DB or upload a new document
-vector_db_options = [f.stem for f in Path(VECTOR_DB_DIR).glob("*.faiss")]
-vector_db_options.append("Upload New Document")  # Add option to upload a new document
-selected_vector_db = st.selectbox("Select Vector DB or Upload New Document", vector_db_options, index=0)
-
-if selected_vector_db != "Upload New Document":
+if not is_upload_mode:
     with st.expander("Maintenance", expanded=False):
         st.warning("This permanently deletes the selected vector DB and related files.")
         confirm_purge = st.checkbox(
@@ -429,39 +455,12 @@ if selected_vector_db != "Upload New Document":
             else:
                 st.warning(f"No files found to purge for '{selected_vector_db}'.")
 
-history_vector_db = selected_vector_db if selected_vector_db != "Upload New Document" else "__upload__"
+history_vector_db = selected_vector_db if not is_upload_mode else "__upload__"
 if st.session_state.get("history_vector_db") != history_vector_db:
     st.session_state["history_vector_db"] = history_vector_db
     st.session_state["question_history"] = load_question_history(history_vector_db, QUESTION_HISTORY_DIR)
 
-with st.expander("Previous Questions", expanded=False):
-    history = st.session_state.get("question_history", [])
-    if selected_vector_db == "Upload New Document":
-        st.caption("Question history is available after you select an existing vector DB.")
-    elif not history:
-        st.caption("No saved question history yet for this vector DB.")
-    else:
-        if st.button("Clear History", key=f"clear_history_{history_vector_db}"):
-            clear_question_history(history_vector_db, QUESTION_HISTORY_DIR)
-            st.session_state["question_history"] = []
-            st.rerun()
-
-        for index, item in enumerate(history[:10], start=1):
-            st.markdown(f"**Q:** {item['question']}")
-            st.caption(
-                f"Model: {item['chat_model']} | Embedding: {item['embedding_model']} | "
-                f"Type: {item.get('response_type', 'Markdown')} | Time: {item['answer_seconds']:.2f}s"
-            )
-            if item.get("answer"):
-                render_response_output(
-                    item["answer"],
-                    item.get("response_type", "Markdown"),
-                    panel_key=f"history_{history_vector_db}_{index}",
-                )
-            if st.button("Reuse Question", key=f"reuse_question_{history_vector_db}_{index}"):
-                st.session_state["question_input"] = item["question"]
-                st.rerun()
-
+if is_upload_mode:
     uploaded_file = st.file_uploader(
         "Upload a document for analysis",
         type=SUPPORTED_UPLOAD_TYPES,
@@ -524,96 +523,6 @@ with st.expander("Previous Questions", expanded=False):
 
                 temp_path.unlink(missing_ok=True)
                 st.rerun()
-
-elif selected_vector_db != "Upload New Document":
-    # Load the selected vector DB
-    vector_db_path = Path(VECTOR_DB_DIR) / f"{selected_vector_db}.faiss"
-    if vector_db_path.exists():
-        embedding_metadata = load_embedding_metadata(selected_vector_db)
-        if embedding_metadata:
-            metadata_provider = embedding_metadata["provider"]
-            metadata_model = embedding_metadata["model"]
-            metadata_base_url = embedding_metadata["base_url"]
-            embeddings = get_embeddings(metadata_model, metadata_base_url, provider=metadata_provider)
-            st.caption(
-                f"Using saved embedding config for semantic search: "
-                f"{metadata_provider}/{metadata_model} @ {metadata_base_url}"
-            )
-        else:
-            embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
-            embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
-            st.warning(
-                "No embedding metadata found for this vector DB. "
-                "Falling back to currently selected embedding settings."
-            )
-        vector_store = FAISS.load_local(str(vector_db_path), embeddings=embeddings, allow_dangerous_deserialization=True)
-
-        # Display PDF in the sidebar
-        pdf_path = Path(VECTOR_DB_DIR) / f"{selected_vector_db}.pdf"
-        if pdf_path.exists():
-            display_pdf_in_sidebar(pdf_path, selected_vector_db)
-        else:
-            display_model_options = github_model_options
-        
-        default_github_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
-        default_github_index = (
-            display_model_options.index(default_github_model)
-            if default_github_model in display_model_options
-            else 0
-        )
-        selected_model = st.selectbox(
-            "Select GitHub Model",
-            display_model_options,
-            index=default_github_index,
-        )
-        if github_model_error:
-            st.warning(github_model_error)
-            selected_model = st.text_input(
-                "Or Enter GitHub Model Manually",
-                value=selected_model,
-            )
-
-        github_endpoint = st.text_input(
-            "GitHub Endpoint",
-            value=os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference"),
-        )
-        github_embedding_endpoint = st.text_input(
-            "GitHub Embedding Endpoint",
-            value=os.getenv("GITHUB_EMBEDDING_BASE_URL", GITHUB_EMBEDDING_BASE_URL),
-        )
-
-    # Embedding model selection (label changes based on provider)
-    if selected_provider == "github":
-        github_embedding_models = [DEFAULT_GITHUB_EMBEDDING_MODEL, "openai/text-embedding-3-large"]
-        default_embedding_index = 0
-        available_embedding_models_display = github_embedding_models
-    else:
-        github_embedding_endpoint = OLLAMA_BASE_URL
-        available_embedding_models_display = available_embedding_models
-        default_embedding_index = (
-            available_embedding_models.index(DEFAULT_EMBEDDING_MODEL)
-            if DEFAULT_EMBEDDING_MODEL in available_embedding_models
-            else 0
-        )
-    embedding_label = "Select Embedding Model" if selected_provider == "github" else "Select Local Embedding Model"
-    selected_embedding_model = st.selectbox(
-        embedding_label,
-        available_embedding_models_display,
-        index=default_embedding_index,
-    )
-
-    response_type = st.selectbox(
-        "Select Response Type",
-        ["Plain Text", "Markdown", "Python Code"],
-        index=1,
-    )
-
-    if model_load_error:
-        st.warning(model_load_error)
-
-    st.caption(
-        "Use the same embedding model that was used when the vector DB was created."
-    )
 
 
 selected_query_vector_dbs: list[str] = []
@@ -799,7 +708,7 @@ if submit_clicked and question and selected_vector_db != "Upload New Document":
                 os.environ["OLLAMA_MODEL"] = selected_model
                 os.environ["OLLAMA_ENDPOINT"] = OLLAMA_BASE_URL
 
-            prompt_result = query_with_multi_source_prompting(
+            llm_result = query_with_multi_source_prompting(
                 question,
                 active_source_configs,
                 provider=selected_provider,
@@ -809,7 +718,11 @@ if submit_clicked and question and selected_vector_db != "Upload New Document":
                 temperature=0.2,
                 auto_truncate_prompt=bool(auto_truncate_prompt),
             )
-        )
+
+        llm_response = llm_result.response
+        if llm_response is None:
+            st.error("Model returned no response.")
+            st.stop()
 
         response = llm_response.content
         metadata = llm_response.get_metadata()
