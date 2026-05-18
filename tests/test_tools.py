@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
@@ -57,6 +59,19 @@ class TestLiteLlmToolFunctions:
         assert result["records"][1]["Close"] == 103.0
 
     @pytest.mark.unit
+    def test_dataframe_to_records_normalizes_timestamp_column_keys(self):
+        frame = pd.DataFrame(
+            {pd.Timestamp("2025-12-31"): [1000]},
+            index=["Revenue"],
+        )
+
+        result = tools._dataframe_to_records(frame)
+
+        assert result["records"][0]["index"] == "Revenue"
+        assert result["records"][0]["2025-12-31T00:00:00"] == 1000
+        json.dumps(result)
+
+    @pytest.mark.unit
     def test_get_analyst_recommendations_returns_consensus(self, fake_ticker):
         result = tools.get_analyst_recommendations("MSFT")
 
@@ -69,7 +84,7 @@ class TestLiteLlmToolFunctions:
 class TestLiteLlmToolRegistry:
     @pytest.mark.unit
     def test_tool_schemas_match_registered_functions(self):
-        schema_names = {entry["function"]["name"] for entry in tools.LITELLM_TOOLS}
+        schema_names = {entry["function"]["name"] for entry in tools.YAHOO_FINANCE_TOOLS}
         registered_names = set(tools.LITELLM_TOOL_FUNCTIONS)
 
         assert schema_names == registered_names

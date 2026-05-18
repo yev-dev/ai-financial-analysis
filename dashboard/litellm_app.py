@@ -8,7 +8,7 @@ import streamlit as st
 from dashboard import DEFAULT_GITHUB_MODEL
 from fin_ai.core.request import ModelRequest, RequestPayload
 from fin_ai.core.response import ResponseFactory, ResponseMetadata
-from fin_ai.agents.tools import LITELLM_TOOLS, LITELLM_TOOL_FUNCTIONS
+from fin_ai.agents.tools import YAHOO_FINANCE_TOOLS, LITELLM_TOOL_FUNCTIONS
 
 
 st.set_page_config(page_title="LiteLLM Chat", layout="wide")
@@ -24,14 +24,14 @@ provider_label_to_key = {
 def _build_tool_aware_system_prompt(base_prompt: str | None) -> str:
     tool_names = [
         tool.get("function", {}).get("name", "")
-        for tool in LITELLM_TOOLS
+        for tool in YAHOO_FINANCE_TOOLS
         if tool.get("type") == "function"
     ]
     tool_names = [name for name in tool_names if name]
     available_tools = ", ".join(tool_names) if tool_names else "none"
 
     tool_guidance = (
-        "You have access to function tools via LITELLM_TOOLS. "
+        "You have access to function tools via YAHOO_FINANCE_TOOLS. "
         f"Available tools: {available_tools}. "
         "When the user asks for stock prices, company facts, dividends, financial statements, "
         "or analyst recommendations, call the most appropriate tool instead of guessing. "
@@ -173,7 +173,7 @@ if st.button("Send", type="primary"):
             max_tokens=int(max_tokens) if max_tokens > 0 else None,
             proxy_port=proxy_port,
             auto_truncate_prompt=bool(auto_truncate_prompt),
-            tools=LITELLM_TOOLS,
+            tools=YAHOO_FINANCE_TOOLS,
         )
 
         try:
@@ -225,7 +225,7 @@ if st.button("Send", type="primary"):
                     max_tokens=payload.max_tokens,
                     proxy_port=payload.proxy_port,
                     auto_truncate_prompt=payload.auto_truncate_prompt,
-                    tools=LITELLM_TOOLS,
+                    tools=YAHOO_FINANCE_TOOLS,
                     messages=follow_up_messages,
                 )
                 response = requester.client.send(

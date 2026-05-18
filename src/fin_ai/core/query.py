@@ -512,6 +512,8 @@ def query_with_multi_source_prompting(
     max_sources: int | None = None,
     use_llm_planner: bool = False,
     planner_provider: Provider | None = None,
+    auto_truncate_prompt: bool = True,
+    tools: list[dict[str, Any]] | None = None,
 ) -> MultiSourcePromptResult:
     """Retrieve across sources, build prompts, and execute a model request."""
     retrieval = retrieve_multi_source_documents(
@@ -534,6 +536,8 @@ def query_with_multi_source_prompting(
         temperature=temperature,
         max_tokens=max_tokens,
         proxy_port=proxy_port,
+        auto_truncate_prompt=auto_truncate_prompt,
+        tools=tools,
     )
     return MultiSourcePromptResult(
         retrieval=retrieval,
@@ -562,6 +566,8 @@ def _run_model_request(
     temperature: float,
     max_tokens: int | None,
     proxy_port: int | None,
+    auto_truncate_prompt: bool = True,
+    tools: list[dict[str, Any]] | None = None,
 ) -> ModelResponse:
     from .request import ModelRequest, RequestPayload
 
@@ -572,6 +578,8 @@ def _run_model_request(
             temperature=temperature,
             max_tokens=max_tokens,
             proxy_port=proxy_port,
+            auto_truncate_prompt=auto_truncate_prompt,
+            tools=tools,
         )
     )
 

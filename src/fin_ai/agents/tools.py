@@ -23,6 +23,13 @@ def _to_json_value(value: Any) -> Any:
     return value
 
 
+def _to_json_key(value: Any) -> str | int | float | bool | None:
+    normalized = _to_json_value(value)
+    if isinstance(normalized, (str, int, float, bool)) or normalized is None:
+        return normalized
+    return str(normalized)
+
+
 def _dataframe_to_records(frame: DataFrame, max_rows: int = 200) -> dict:
     if frame is None or frame.empty:
         return {"row_count": 0, "truncated": False, "records": []}
@@ -33,7 +40,7 @@ def _dataframe_to_records(frame: DataFrame, max_rows: int = 200) -> dict:
 
     records = converted.reset_index().to_dict(orient="records")
     json_records = [
-        {k: _to_json_value(v) for k, v in row.items()}
+        {_to_json_key(k): _to_json_value(v) for k, v in row.items()}
         for row in records[:max_rows]
     ]
     return {
@@ -144,7 +151,7 @@ def get_analyst_recommendations(symbol: str) -> dict:
     }
 
 
-LITELLM_TOOLS = [
+YAHOO_FINANCE_TOOLS = [
     {
         "type": "function",
         "function": {

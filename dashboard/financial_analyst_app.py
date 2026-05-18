@@ -48,6 +48,8 @@ from fin_ai.core.query import (
     format_source_citations,
     query_with_multi_source_prompting,
 )
+from fin_ai.agents.tools import YAHOO_FINANCE_TOOLS, execute_litellm_tool_call
+from fin_ai.core.request import ModelRequest, RequestPayload
 from fin_ai.core.rag import (
     _create_source_metadata,
     create_or_load_vector_store,
@@ -129,6 +131,73 @@ def render_source_citations(citations_text: str | None, response_type: str) -> N
         st.text(citations_text)
     else:
         st.markdown(citations_text.replace('$', '\\$'))
+
+
+def _build_tool_aware_system_prompt(base_prompt: str | None) -> str:
+    tool_names = [
+        tool.get("function", {}).get("name", "")
+        for tool in YAHOO_FINANCE_TOOLS
+        if tool.get("type") == "function"
+    ]
+    tool_names = [name for name in tool_names if name]
+    available_tools = ", ".join(tool_names) if tool_names else "none"
+
+    tool_guidance = (
+        "You have access to function tools via YAHOO_FINANCE_TOOLS. "
+        f"Available tools: {available_tools}. "
+        "When the user asks for stock prices, company facts, dividends, financial statements, "
+        "or analyst recommendations, call the most appropriate tool instead of guessing. "
+        "Use the exact tool arguments required by the schema. "
+        "After tool output is returned, summarize clearly and reference the returned data."
+    )
+
+    base = (base_prompt or "").strip()
+    if tool_guidance in base:
+        return base
+    if not base:
+        return tool_guidance
+    return f"{base}\n\n{tool_guidance}"
+
+
+def _extract_tool_calls(message: object) -> list[dict]:
+    tool_calls = getattr(message, "tool_calls", None)
+    if not tool_calls:
+        return []
+
+    extracted: list[dict] = []
+    for tool_call in tool_calls:
+        if isinstance(tool_call, dict):
+            function_payload = tool_call.get("function", {})
+            name = function_payload.get("name")
+            arguments_text = function_payload.get("arguments", "{}")
+            call_id = tool_call.get("id")
+        else:
+            function_payload = getattr(tool_call, "function", None)
+            name = getattr(function_payload, "name", None)
+            arguments_text = getattr(function_payload, "arguments", "{}")
+            call_id = getattr(tool_call, "id", None)
+
+        try:
+            arguments = json.loads(arguments_text or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+
+        extracted.append(
+            {
+                "id": call_id or f"call_{len(extracted)}",
+                "name": name,
+                "arguments": arguments,
+                "arguments_text": arguments_text or "{}",
+            }
+        )
+
+    return extracted
+
+
+def _execute_tool(name: str | None, arguments: dict) -> dict:
+    if not name:
+        return {"error": "Missing tool name"}
+    return execute_litellm_tool_call(name, arguments)
 
 
 def render_pyodide_runner(initial_code: str, panel_key: str) -> None:
@@ -329,10 +398,11 @@ available_chat_models, available_embedding_models, model_load_error = get_local_
 
 # Provider selection for both chat and embeddings
 provider_label_to_key = {
-    "Local Ollama": "ollama",
     "GitHub Models": "github",
+    "Local Ollama": "ollama",
+    
 }
-selected_provider_label = st.selectbox("Select Provider", list(provider_label_to_key.keys()), index=0)
+selected_provider_label = st.selectbox("Select Provider", list(provider_label_to_key.keys()))
 selected_provider = provider_label_to_key[selected_provider_label]
 github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
 github_model_error = None
@@ -420,6 +490,22 @@ auto_truncate_prompt = st.checkbox(
     value=True,
     help="Disable only for debugging request-size failures with strict-input models.",
 )
+
+use_tools = st.checkbox(
+    "Enable function tools (financial data)",
+    value=False,
+    help=(
+        "Allow the model to call yfinance tools for live stock data, company info, "
+        "dividends, financial statements, and analyst recommendations."
+    ),
+)
+
+if use_tools:
+    with st.expander("Available tools", expanded=False):
+        for tool in YAHOO_FINANCE_TOOLS:
+            if tool.get("type") == "function":
+                fn = tool["function"]
+                st.markdown(f"**`{fn['name']}`** — {fn.get('description', '')}")
 
 if model_load_error:
     st.warning(model_load_error)
@@ -708,18 +794,73 @@ if submit_clicked and question and selected_vector_db != "Upload New Document":
                 os.environ["OLLAMA_MODEL"] = selected_model
                 os.environ["OLLAMA_ENDPOINT"] = OLLAMA_BASE_URL
 
+            base_system_prompt = "You are a concise financial analysis assistant."
+            effective_system_prompt = (
+                _build_tool_aware_system_prompt(base_system_prompt)
+                if use_tools
+                else base_system_prompt
+            )
+
             llm_result = query_with_multi_source_prompting(
                 question,
                 active_source_configs,
                 provider=selected_provider,
                 response_format="text",
                 mode=retrieval_mode,
-                system_prompt="You are a concise financial analysis assistant.",
+                system_prompt=effective_system_prompt,
                 temperature=0.2,
                 auto_truncate_prompt=bool(auto_truncate_prompt),
+                tools=YAHOO_FINANCE_TOOLS if use_tools else None,
             )
 
-        llm_response = llm_result.response
+            llm_response = llm_result.response
+            if use_tools and llm_response is not None:
+                first_message = llm_response.get_metadata().raw_response.choices[0].message
+                tool_calls = _extract_tool_calls(first_message)
+                if tool_calls:
+                    follow_up_messages = [
+                        {"role": "system", "content": effective_system_prompt},
+                        {"role": "user", "content": llm_result.prompt},
+                        {
+                            "role": "assistant",
+                            "content": first_message.content or "",
+                            "tool_calls": [
+                                {
+                                    "id": tc["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc["name"],
+                                        "arguments": tc["arguments_text"],
+                                    },
+                                }
+                                for tc in tool_calls
+                            ],
+                        },
+                    ]
+                    for tc in tool_calls:
+                        tool_result = _execute_tool(tc["name"], tc["arguments"])
+                        follow_up_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": tc["name"] or "unknown_tool",
+                                "content": json.dumps(tool_result),
+                            }
+                        )
+                    follow_up_payload = RequestPayload(
+                        prompt=question,
+                        system_prompt=effective_system_prompt,
+                        temperature=0.2,
+                        auto_truncate_prompt=bool(auto_truncate_prompt),
+                        tools=YAHOO_FINANCE_TOOLS,
+                        messages=follow_up_messages,
+                    )
+                    requester = ModelRequest(provider=selected_provider, format="text")
+                    llm_response = requester.client.send(
+                        follow_up_payload,
+                        response_class=requester.response_class,
+                    )
+
         if llm_response is None:
             st.error("Model returned no response.")
             st.stop()
