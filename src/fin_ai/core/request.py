@@ -13,8 +13,77 @@ from fin_ai.core.response import ConsoleModelResponse, ModelResponse, Provider, 
 
 litellm.drop_params = True
 
-GPT5_INPUT_TOKEN_LIMIT = 4000
-GPT5_SAFE_INPUT_BUDGET = 3600
+MODEL_INPUT_TOKEN_LIMITS = {
+    "gpt-5": 4000,
+    "gpt-4.1-mini": 8000,
+}
+
+MODEL_SAFE_INPUT_BUDGETS = {
+    "gpt-5": 3600,
+    "gpt-4.1-mini": 7200,
+}
+
+
+def resolve_model_name(provider: Provider) -> str:
+    if provider == "ollama":
+        return f"ollama/{os.getenv('OLLAMA_MODEL', 'llama3.1')}"
+    if provider == "github":
+        return os.getenv("GITHUB_MODEL", "openai/gpt-4o")
+    raise ValueError(f"Unknown provider {provider!r}.")
+
+
+def get_model_input_token_limit(model: str) -> int | None:
+    normalized = model.lower()
+    for model_key, limit in MODEL_INPUT_TOKEN_LIMITS.items():
+        if model_key in normalized:
+            return limit
+    return None
+
+
+def get_model_safe_input_budget(model: str) -> int | None:
+    normalized = model.lower()
+    for model_key, budget in MODEL_SAFE_INPUT_BUDGETS.items():
+        if model_key in normalized:
+            return budget
+    return None
+
+
+def count_tokens(text: str) -> int:
+    if not text:
+        return 0
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text))
+    except Exception:
+        # Fallback heuristic: roughly 4 characters per token for English prose.
+        return max(1, len(text) // 4)
+
+
+def count_message_tokens(messages: list[dict[str, Any]]) -> int:
+    return sum(count_tokens(str(message.get("content", ""))) for message in messages)
+
+
+def trim_text_to_tokens(text: str, max_tokens: int) -> str:
+    if max_tokens <= 0:
+        return ""
+    if count_tokens(text) <= max_tokens:
+        return text
+
+    left = 0
+    right = len(text)
+    best = ""
+
+    while left <= right:
+        mid = (left + right) // 2
+        candidate = text[:mid]
+        token_count = count_tokens(candidate)
+        if token_count <= max_tokens:
+            best = candidate
+            left = mid + 1
+        else:
+            right = mid - 1
+
+    return best.rstrip()
 
 
 @dataclass(slots=True)
@@ -95,7 +164,7 @@ class LiteLLMClient:
         if request.auto_truncate_prompt:
             guard = _apply_model_input_guard(messages, self.model)
         else:
-            current_tokens = sum(_count_tokens(str(message.get("content", ""))) for message in messages)
+            current_tokens = count_message_tokens(messages)
             guard = PromptGuardResult(
                 messages=messages,
                 truncated=False,
@@ -140,12 +209,13 @@ class LiteLLMClient:
 
 
 def _apply_model_input_guard(messages: list[dict[str, str]], model: str) -> PromptGuardResult:
-    """Trim oversized prompts for strict-input models (e.g. gpt-5) before API call."""
-    current_tokens = sum(_count_tokens(str(message.get("content", ""))) for message in messages)
-    if "gpt-5" not in model.lower():
+    """Trim oversized prompts for strict-input models before API call."""
+    current_tokens = count_message_tokens(messages)
+    safe_budget = get_model_safe_input_budget(model)
+    if safe_budget is None:
         return PromptGuardResult(messages=messages, prompt_tokens_before=current_tokens, prompt_tokens_after=current_tokens)
 
-    if current_tokens <= GPT5_SAFE_INPUT_BUDGET:
+    if current_tokens <= safe_budget:
         return PromptGuardResult(messages=messages, prompt_tokens_before=current_tokens, prompt_tokens_after=current_tokens)
 
     adjusted = deepcopy(messages)
@@ -154,60 +224,26 @@ def _apply_model_input_guard(messages: list[dict[str, str]], model: str) -> Prom
         return PromptGuardResult(messages=adjusted, prompt_tokens_before=current_tokens, prompt_tokens_after=current_tokens)
 
     target_idx = user_indexes[-1]
-    other_tokens = sum(
-        _count_tokens(str(msg.get("content", "")))
-        for idx, msg in enumerate(adjusted)
-        if idx != target_idx
+    other_tokens = count_message_tokens(
+        [msg for idx, msg in enumerate(adjusted) if idx != target_idx]
     )
-    max_user_tokens = max(128, GPT5_SAFE_INPUT_BUDGET - other_tokens)
+    max_user_tokens = max(128, safe_budget - other_tokens)
 
     original_user_text = str(adjusted[target_idx].get("content", ""))
-    trimmed_user_text = _trim_text_to_tokens(original_user_text, max_user_tokens)
+    trimmed_user_text = trim_text_to_tokens(original_user_text, max_user_tokens)
     truncated = trimmed_user_text != original_user_text
     if truncated:
-        trimmed_user_text += "\n\n[Prompt truncated to fit gpt-5 input limit.]"
+        limit = get_model_input_token_limit(model)
+        limit_note = f"{limit} token" if limit is not None else "model"
+        trimmed_user_text += f"\n\n[Prompt truncated to fit {limit_note} input limit.]"
     adjusted[target_idx]["content"] = trimmed_user_text
-    after_tokens = sum(_count_tokens(str(message.get("content", ""))) for message in adjusted)
+    after_tokens = count_message_tokens(adjusted)
     return PromptGuardResult(
         messages=adjusted,
         truncated=truncated,
         prompt_tokens_before=current_tokens,
         prompt_tokens_after=after_tokens,
     )
-
-
-def _count_tokens(text: str) -> int:
-    if not text:
-        return 0
-    try:
-        encoding = tiktoken.get_encoding("cl100k_base")
-        return len(encoding.encode(text))
-    except Exception:
-        # Fallback heuristic: roughly 4 characters per token for English prose.
-        return max(1, len(text) // 4)
-
-
-def _trim_text_to_tokens(text: str, max_tokens: int) -> str:
-    if max_tokens <= 0:
-        return ""
-    if _count_tokens(text) <= max_tokens:
-        return text
-
-    left = 0
-    right = len(text)
-    best = ""
-
-    while left <= right:
-        mid = (left + right) // 2
-        candidate = text[:mid]
-        token_count = _count_tokens(candidate)
-        if token_count <= max_tokens:
-            best = candidate
-            left = mid + 1
-        else:
-            right = mid - 1
-
-    return best.rstrip()
 
 
 class ModelRequest:
@@ -224,11 +260,10 @@ class ModelRequest:
 
 def _build_ollama_client() -> LiteLLMClient:
     endpoint = _normalize_ollama_endpoint(os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434"))
-    model_name = os.getenv("OLLAMA_MODEL", "llama3.1")
     default_proxy_port = _read_proxy_port_from_env()
     return LiteLLMClient(
         provider="ollama",
-        model=f"ollama/{model_name}",
+        model=resolve_model_name("ollama"),
         api_base=endpoint,
         proxy_port=default_proxy_port,
     )
@@ -239,11 +274,10 @@ def _build_github_client() -> LiteLLMClient:
     if not token:
         raise ValueError("Missing GITHUB_TOKEN in environment.")
     endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
-    model_name = os.getenv("GITHUB_MODEL", "openai/gpt-4o")
     default_proxy_port = _read_proxy_port_from_env()
     return LiteLLMClient(
         provider="github",
-        model=model_name,
+        model=resolve_model_name("github"),
         api_base=endpoint,
         api_key=token,
         proxy_port=default_proxy_port,
