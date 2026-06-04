@@ -5,7 +5,8 @@ import json
 import streamlit as st
 
 # Import dashboard first so dashboard/__init__.py runs and bootstraps paths.
-from dashboard import DEFAULT_GITHUB_MODEL
+from dashboard import DEFAULT_GITHUB_MODEL, DEFAULT_DEEPSEEK_MODEL, DEEPSEEK_BASE_URL
+from fin_ai.core.providers import list_models
 from fin_ai.core.request import ModelRequest, RequestPayload
 from fin_ai.core.response import ResponseFactory, ResponseMetadata
 from fin_ai.agents.tools import YAHOO_FINANCE_TOOLS, LITELLM_TOOL_FUNCTIONS
@@ -18,6 +19,7 @@ st.caption("Query either GitHub Models or local Ollama using fin_ai.core request
 provider_label_to_key = {
     "GitHub Models": "github",
     "Local Ollama": "ollama",
+    "DeepSeek API": "deepseek",
 }
 
 
@@ -99,7 +101,13 @@ def _execute_tool(name: str | None, arguments: dict) -> dict:
 
 with st.sidebar:
     st.header("Settings")
-    provider_label = st.selectbox("Provider", list(provider_label_to_key.keys()), index=0)
+    default_provider = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
+    provider_labels = list(provider_label_to_key.keys())
+    default_provider_index = next(
+        (i for i, k in enumerate(provider_labels) if provider_label_to_key[k] == default_provider),
+        0,
+    )
+    provider_label = st.selectbox("Provider", provider_labels, index=default_provider_index)
     provider = provider_label_to_key[provider_label]
 
     response_format = st.selectbox(
@@ -118,17 +126,89 @@ with st.sidebar:
     )
     st.text_input("Proxy Port (optional)", value=os.getenv("PX_PROXY_PORT", ""), key="proxy_port_input")
 
+    # ---- Dynamic model listing based on selected provider ----
     if provider == "github":
-        st.text_input("GitHub Model", value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL), key="github_model")
+        github_token = st.text_input(
+            "GitHub Token",
+            value=os.getenv("GITHUB_TOKEN", ""),
+            type="password",
+            key="github_token",
+        )
+        with st.spinner("Fetching available GitHub models..."):
+            gh_models = list_models("github", api_key=github_token)
+        gh_model_ids = [m.id for m in gh_models]
+        if gh_model_ids:
+            default_gh = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
+            default_gh_idx = gh_model_ids.index(default_gh) if default_gh in gh_model_ids else 0
+            st.selectbox(
+                "GitHub Model",
+                gh_model_ids,
+                index=default_gh_idx,
+                key="github_model",
+            )
+        else:
+            st.text_input(
+                "GitHub Model",
+                value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL),
+                key="github_model",
+            )
+            st.caption("No models found. Check your token or enter a model name manually.")
         st.text_input(
             "GitHub Endpoint",
             value=os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference"),
             key="github_endpoint",
         )
-        st.text_input("GitHub Token", value=os.getenv("GITHUB_TOKEN", ""), type="password", key="github_token")
+    elif provider == "deepseek":
+        deepseek_token = os.getenv("DEEPSEEK_TOKEN", "")
+        with st.spinner("Fetching available DeepSeek models..."):
+            ds_models = list_models("deepseek", api_key=deepseek_token)
+        ds_model_ids = [m.id for m in ds_models]
+        if ds_model_ids:
+            default_ds = os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
+            default_ds_idx = ds_model_ids.index(default_ds) if default_ds in ds_model_ids else 0
+            st.selectbox(
+                "DeepSeek Model",
+                ds_model_ids,
+                index=default_ds_idx,
+                key="deepseek_model",
+            )
+        else:
+            st.text_input(
+                "DeepSeek Model",
+                value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL),
+                key="deepseek_model",
+            )
+            st.caption("No models found. Check your token or enter a model name manually.")
+        st.text_input(
+            "DeepSeek Base URL",
+            value=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
+            key="deepseek_base_url",
+        )
     else:
-        st.text_input("Ollama Model", value=os.getenv("OLLAMA_MODEL", "llama3.1"), key="ollama_model")
-        st.text_input("Ollama Endpoint", value=os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434"), key="ollama_endpoint")
+        ollama_endpoint = st.text_input(
+            "Ollama Endpoint",
+            value=os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434"),
+            key="ollama_endpoint",
+        )
+        with st.spinner("Fetching available Ollama models..."):
+            ol_models = list_models("ollama", base_url=ollama_endpoint)
+        ol_model_ids = [m.id for m in ol_models]
+        if ol_model_ids:
+            default_ol = os.getenv("OLLAMA_MODEL", "llama3.1")
+            default_ol_idx = ol_model_ids.index(default_ol) if default_ol in ol_model_ids else 0
+            st.selectbox(
+                "Ollama Model",
+                ol_model_ids,
+                index=default_ol_idx,
+                key="ollama_model",
+            )
+        else:
+            st.text_input(
+                "Ollama Model",
+                value=os.getenv("OLLAMA_MODEL", "llama3.1"),
+                key="ollama_model",
+            )
+            st.caption("No models found. Is Ollama running?")
 
 system_prompt = st.text_area(
     "System Prompt",
@@ -153,6 +233,10 @@ if st.button("Send", type="primary"):
             os.environ["GITHUB_MODEL"] = st.session_state["github_model"]
             os.environ["GITHUB_ENDPOINT"] = st.session_state["github_endpoint"]
             os.environ["GITHUB_TOKEN"] = st.session_state["github_token"]
+        elif provider == "deepseek":
+            os.environ["DEEPSEEK_MODEL"] = st.session_state["deepseek_model"]
+            os.environ["DEEPSEEK_BASE_URL"] = st.session_state["deepseek_base_url"]
+            os.environ["DEEPSEEK_TOKEN"] = deepseek_token
         else:
             os.environ["OLLAMA_MODEL"] = st.session_state["ollama_model"]
             os.environ["OLLAMA_ENDPOINT"] = st.session_state["ollama_endpoint"]

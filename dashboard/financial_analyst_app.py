@@ -35,14 +35,18 @@ from dashboard import (
     DEFAULT_GITHUB_MODEL,
     DEFAULT_GITHUB_EMBEDDING_MODEL,
     GITHUB_EMBEDDING_BASE_URL,
+    DEFAULT_DEEPSEEK_MODEL,
+    DEEPSEEK_BASE_URL,
     DEFAULT_CHAT_MODEL,
     DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDINGS_PROVIDER,
     OLLAMA_BASE_URL,
     QUESTION_HISTORY_DIR,
     VECTOR_DB_DIR,
 )
 
 
+from fin_ai.core.providers import ModelInfo, list_models
 from fin_ai.core.query import (
     build_source_retriever_configs,
     format_source_citations,
@@ -273,41 +277,6 @@ def render_pyodide_runner(initial_code: str, panel_key: str) -> None:
 @st.cache_data(ttl=10)
 def get_local_model_options() -> tuple[list[str], list[str], str | None]:
     return [DEFAULT_CHAT_MODEL], [DEFAULT_EMBEDDING_MODEL], None
-    # return load_local_model_options(
-    #     base_url=OLLAMA_BASE_URL,
-    #     default_chat_model=DEFAULT_CHAT_MODEL,
-    #     default_embedding_model=DEFAULT_EMBEDDING_MODEL,
-    # )
-
-
-@st.cache_data(ttl=300)
-def get_github_model_options(github_token: str) -> tuple[list[str], str | None]:
-    url = "https://models.github.ai/catalog/models"
-    headers = {}
-    if github_token:
-        headers["Authorization"] = f"Bearer {github_token}"
-
-    request = Request(url, headers=headers)
-    try:
-        with urlopen(request, timeout=15) as response:
-            payload = json.load(response)
-    except URLError as exc:
-        return [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)], f"Unable to load GitHub models: {exc.reason}"
-    except Exception as exc:
-        return [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)], f"Unable to load GitHub models: {exc}"
-
-    model_ids = sorted(
-        {
-            str(item.get("id", "")).strip()
-            for item in payload
-            if isinstance(item, dict) and item.get("id")
-        }
-    )
-
-    if not model_ids:
-        return [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)], "No GitHub models found in catalog."
-
-    return model_ids, None
 
 # Function to display PDF content as images in the sidebar
 def display_pdf_in_sidebar(pdf_path, file_name):
@@ -398,11 +367,17 @@ available_chat_models, available_embedding_models, model_load_error = get_local_
 
 # Provider selection for both chat and embeddings
 provider_label_to_key = {
-    "GitHub Models": "github",
     "Local Ollama": "ollama",
-    
+    "GitHub Models": "github",
+    "DeepSeek API": "deepseek",
 }
-selected_provider_label = st.selectbox("Select Provider", list(provider_label_to_key.keys()))
+default_provider = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
+provider_labels = list(provider_label_to_key.keys())
+default_provider_index = next(
+    (i for i, k in enumerate(provider_labels) if provider_label_to_key[k] == default_provider),
+    0,
+)
+selected_provider_label = st.selectbox("Select Provider", provider_labels, index=default_provider_index)
 selected_provider = provider_label_to_key[selected_provider_label]
 github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
 github_model_error = None
@@ -413,7 +388,12 @@ if selected_provider == "github":
         value=os.getenv("GITHUB_TOKEN", ""),
         type="password",
     )
-    display_model_options, github_model_error = get_github_model_options(github_token)
+    with st.spinner("Fetching available GitHub models..."):
+        gh_models = list_models("github", api_key=github_token)
+    display_model_options = [m.id for m in gh_models]
+    if not display_model_options:
+        display_model_options = [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
+        github_model_error = "No GitHub models found. Check your token."
     default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
     default_chat_index = (
         display_model_options.index(default_chat_model)
@@ -445,6 +425,44 @@ if selected_provider == "github":
         "openai/text-embedding-3-large",
     ]
     default_embedding_index = 0
+elif selected_provider == "deepseek":
+
+    deepseek_token = st.text_input(
+        "DeepSeek Token",
+        value=os.getenv("DEEPSEEK_TOKEN", ""),
+        type="password",
+    )
+    with st.spinner("Fetching available DeepSeek models..."):
+        ds_models = list_models("deepseek", api_key=deepseek_token)
+    deepseek_model_ids = [m.id for m in ds_models]
+    if deepseek_model_ids:
+        default_ds = os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
+        default_ds_idx = deepseek_model_ids.index(default_ds) if default_ds in deepseek_model_ids else 0
+        selected_model = st.selectbox(
+            "Select DeepSeek Model",
+            deepseek_model_ids,
+            index=default_ds_idx,
+        )
+        model_load_error = None
+    else:
+        selected_model = st.text_input(
+            "Select DeepSeek Model",
+            value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL),
+        )
+        model_load_error = "No DeepSeek models found. Check your token."
+    deepseek_base_url = st.text_input(
+        "DeepSeek Base URL",
+        value=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
+    )
+    # DeepSeek does not provide embedding models — fall back to Ollama embeddings.
+    github_embedding_endpoint = OLLAMA_BASE_URL
+    available_embedding_models_display = available_embedding_models
+    default_embedding_index = (
+        available_embedding_models.index(DEFAULT_EMBEDDING_MODEL)
+        if DEFAULT_EMBEDDING_MODEL in available_embedding_models
+        else 0
+    )
+    github_token = os.getenv("GITHUB_TOKEN", "").strip()
 else:
     github_token = os.getenv("GITHUB_TOKEN", "").strip()
     default_chat_model = os.getenv("OLLAMA_MODEL", DEFAULT_CHAT_MODEL)
@@ -466,18 +484,70 @@ else:
         else 0
     )
 
+# Embedding provider (separate from chat provider)
+embeddings_provider_label_to_key = {
+    "Local Ollama": "ollama",
+    "GitHub Models": "github",
+}
+default_emb_provider = os.getenv("DEFAULT_EMBEDDINGS_PROVIDER", DEFAULT_EMBEDDINGS_PROVIDER).strip().lower()
+emb_provider_labels = list(embeddings_provider_label_to_key.keys())
+default_emb_provider_index = next(
+    (i for i, k in enumerate(emb_provider_labels) if embeddings_provider_label_to_key[k] == default_emb_provider),
+    0,
+)
+selected_emb_provider_label = st.selectbox(
+    "Select Embedding Provider",
+    emb_provider_labels,
+    index=default_emb_provider_index,
+    key="embedding_provider",
+)
+selected_emb_provider = embeddings_provider_label_to_key[selected_emb_provider_label]
+
+if selected_emb_provider == "github":
+    embedding_github_token = st.text_input(
+        "GitHub Token (Embeddings)",
+        value=os.getenv("GITHUB_TOKEN", ""),
+        type="password",
+        key="embedding_github_token",
+    )
+    with st.spinner("Fetching GitHub embedding models..."):
+        emb_models = list_models("github", api_key=embedding_github_token)
+    available_embedding_models_display = [m.id for m in emb_models] if emb_models else [
+        DEFAULT_GITHUB_EMBEDDING_MODEL,
+        "openai/text-embedding-3-large",
+    ]
+    default_embedding_index = (
+        available_embedding_models_display.index(DEFAULT_GITHUB_EMBEDDING_MODEL)
+        if DEFAULT_GITHUB_EMBEDDING_MODEL in available_embedding_models_display
+        else 0
+    )
+    embeddings_base_url = os.getenv("GITHUB_EMBEDDING_BASE_URL", GITHUB_EMBEDDING_BASE_URL)
+else:
+    ollama_emb_endpoint = st.text_input(
+        "Ollama Endpoint (Embeddings)",
+        value=os.getenv("OLLAMA_ENDPOINT", OLLAMA_BASE_URL),
+        key="embedding_ollama_endpoint",
+    )
+    available_embedding_models_display = available_embedding_models
+    default_embedding_index = (
+        available_embedding_models_display.index(DEFAULT_EMBEDDING_MODEL)
+        if DEFAULT_EMBEDDING_MODEL in available_embedding_models_display
+        else 0
+    )
+    embeddings_base_url = ollama_emb_endpoint
+
+selected_embedding_model = st.selectbox(
+    "Select Embedding Model",
+    available_embedding_models_display,
+    index=default_embedding_index,
+)
+
 if is_upload_mode:
     selected_source_type = st.selectbox(
         "Type of Source Document",
         SUPPORTED_UPLOAD_TYPES,
         index=0,
     )
-embedding_label = "Select Embedding Model" if selected_provider == "github" else "Select Local Embedding Model"
-selected_embedding_model = st.selectbox(
-    embedding_label,
-    available_embedding_models_display,
-    index=default_embedding_index,
-)
 
 response_type = st.selectbox(
     "Select Response Type",
@@ -583,15 +653,14 @@ if is_upload_mode:
                 document_metadata["file_size"] = len(document_binary)
                 chunks = get_markdown_splits(markdown_content, metadata=document_metadata)
 
-                embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
-                embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
+                embeddings = get_embeddings(selected_embedding_model, embeddings_base_url, provider=selected_emb_provider)
 
                 vector_store = create_or_load_vector_store(uploaded_file.name.split(".")[0], chunks, embeddings)
                 save_embedding_metadata(
                     uploaded_file.name.split(".")[0],
-                    provider=selected_provider,
+                    provider=selected_emb_provider,
                     model=selected_embedding_model,
-                    base_url=embeddings_url,
+                    base_url=embeddings_base_url,
                 )
 
                 # Ensure vector DB and PDF are stored correctly
@@ -689,8 +758,23 @@ if selected_vector_db != "Upload New Document":
         disabled=retrieval_mode != "routed",
     )
 
-    embeddings_url = github_embedding_endpoint if selected_provider == "github" else OLLAMA_BASE_URL
-    embeddings = get_embeddings(selected_embedding_model, embeddings_url, provider=selected_provider)
+    # Try to use saved embedding metadata from the primary selected vector DB
+    saved_emb_meta = load_embedding_metadata(selected_vector_db)
+    if saved_emb_meta:
+        actual_emb_provider = saved_emb_meta["provider"]
+        actual_emb_model = saved_emb_meta["model"]
+        actual_emb_base_url = saved_emb_meta["base_url"]
+        st.caption(
+            f"🔖 Using saved embedding config for **{selected_vector_db}**: "
+            f"`{actual_emb_provider}/{actual_emb_model} @ {actual_emb_base_url}`"
+        )
+        embeddings = get_embeddings(actual_emb_model, actual_emb_base_url, provider=actual_emb_provider)
+    else:
+        embeddings = get_embeddings(selected_embedding_model, embeddings_base_url, provider=selected_emb_provider)
+        st.caption(
+            f"Using current embedding selection: "
+            f"`{selected_emb_provider}/{selected_embedding_model} @ {embeddings_base_url}`"
+        )
 
     for query_vector_db in selected_query_vector_dbs:
         if query_vector_db in source_vector_stores:
@@ -790,6 +874,10 @@ if submit_clicked and question and selected_vector_db != "Upload New Document":
                 os.environ["GITHUB_TOKEN"] = github_token
                 os.environ["GITHUB_MODEL"] = selected_model
                 os.environ["GITHUB_ENDPOINT"] = github_endpoint
+            elif selected_provider == "deepseek":
+                os.environ["DEEPSEEK_TOKEN"] = deepseek_token
+                os.environ["DEEPSEEK_MODEL"] = selected_model
+                os.environ["DEEPSEEK_BASE_URL"] = deepseek_base_url
             else:
                 os.environ["OLLAMA_MODEL"] = selected_model
                 os.environ["OLLAMA_ENDPOINT"] = OLLAMA_BASE_URL

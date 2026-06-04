@@ -29,6 +29,8 @@ def resolve_model_name(provider: Provider) -> str:
         return f"ollama/{os.getenv('OLLAMA_MODEL', 'llama3.1')}"
     if provider == "github":
         return os.getenv("GITHUB_MODEL", "openai/gpt-4o")
+    if provider == "deepseek":
+        return f"deepseek/{os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')}"
     raise ValueError(f"Unknown provider {provider!r}.")
 
 
@@ -284,12 +286,29 @@ def _build_github_client() -> LiteLLMClient:
     )
 
 
+def _build_deepseek_client() -> LiteLLMClient:
+    token = os.getenv("DEEPSEEK_TOKEN")
+    if not token:
+        raise ValueError("Missing DEEPSEEK_TOKEN in environment.")
+    endpoint = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+    model_name = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    default_proxy_port = _read_proxy_port_from_env()
+    return LiteLLMClient(
+        provider="deepseek",
+        model=f"deepseek/{model_name}",
+        api_base=endpoint,
+        api_key=token,
+        proxy_port=default_proxy_port,
+    )
+
+
 class ModelRequestFactory:
     """Factory that creates provider-specific LiteLLM clients from env config."""
 
     _registry: dict[str, Any] = {
         "ollama": _build_ollama_client,
         "github": _build_github_client,
+        "deepseek": _build_deepseek_client,
     }
 
     @classmethod

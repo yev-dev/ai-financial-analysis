@@ -21,8 +21,11 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_GITHUB_MODEL = "openai/gpt-4o"
 DEFAULT_GITHUB_EMBEDDING_MODEL = "openai/text-embedding-3-small"
 GITHUB_EMBEDDING_BASE_URL = "https://models.github.ai/inference"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_CHAT_MODEL = "deepseek-r1:1.5b"
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text:latest"
+DEFAULT_EMBEDDINGS_PROVIDER = os.getenv("DEFAULT_EMBEDDINGS_PROVIDER", "ollama").strip().lower()
 QUESTION_HISTORY_DIR = Path(VECTOR_DB_DIR) / "question_history"
 
 os.makedirs(VECTOR_DB_DIR, exist_ok=True)
@@ -37,7 +40,10 @@ __all__ = [
     "DEFAULT_GITHUB_MODEL",
     "DEFAULT_GITHUB_EMBEDDING_MODEL",
     "GITHUB_EMBEDDING_BASE_URL",
+    "DEFAULT_DEEPSEEK_MODEL",
+    "DEEPSEEK_BASE_URL",
     "DEFAULT_CHAT_MODEL",
     "DEFAULT_EMBEDDING_MODEL",
+    "DEFAULT_EMBEDDINGS_PROVIDER",
     "QUESTION_HISTORY_DIR",
 ]

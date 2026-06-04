@@ -469,11 +469,11 @@ def get_github_embeddings(model_name: str, base_url: str | None = None) -> objec
 def get_embeddings(model_name: str, base_url: str, provider: str = "ollama") -> object:
     """
     Return embeddings instance based on provider selection.
-    provider: "ollama" or "github"
+    provider: "ollama", "github", or "deepseek"
     """
     if provider == "ollama":
         return get_ollama_embeddings(model_name, base_url)
-    elif provider == "github":
+    elif provider in ("github", "deepseek"):
         return get_github_embeddings(model_name, base_url=base_url)
     else:
         raise ValueError(f"Unknown provider: {provider}")
