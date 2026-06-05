@@ -4,7 +4,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-FIN_APP_PATH="$PROJECT_DIR/dashboard/financial_analyst_app.py"
+FIN_APP_PATH="$PROJECT_DIR/dashboard/financial_analyst_dashboard.py"
 LITELLM_APP_PATH="$PROJECT_DIR/dashboard/litellm_app.py"
 VECTOR_DB_PATH_DEFAULT="$PROJECT_DIR/vector_db"
 
