@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import shutil
 import tempfile
 import warnings
@@ -31,7 +32,6 @@ import html2text
 from docx import Document as WordDocument
 
 from dashboard import DEFAULT_CHAT_MODEL, OLLAMA_BASE_URL, VECTOR_DB_DIR
-
 
 def _embedding_metadata_path(filename: str) -> Path:
     return Path(VECTOR_DB_DIR) / f"{filename}.embedding.json"
@@ -689,17 +689,22 @@ def create_or_load_vector_store(filename, chunks, embeddings, group_by_source: b
             docstore=InMemoryDocstore(),
             index_to_docstore_id={}
         )
-        # Add documents - handle both Document objects and strings
-        docs_to_add = []
-        for chunk in chunks:
-            if isinstance(chunk, Document):
-                docs_to_add.append(chunk)
-            else:
-                # Convert string to Document with empty metadata
-                docs_to_add.append(Document(page_content=str(chunk), metadata={}))
-        
-        vector_store.add_documents(docs_to_add)
-        vector_store.save_local(str(vector_db_path))
+
+        try:
+            # Add documents - handle both Document objects and strings
+            docs_to_add = []
+            for chunk in chunks:
+                if isinstance(chunk, Document):
+                    docs_to_add.append(chunk)
+                else:
+                    # Convert string to Document with empty metadata
+                    docs_to_add.append(Document(page_content=str(chunk), metadata={}))
+            
+            vector_store.add_documents(docs_to_add)
+        except Exception as e:
+            print(e)
+        else:
+            vector_store.save_local(str(vector_db_path))
     return vector_store
 
 

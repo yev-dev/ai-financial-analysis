@@ -429,7 +429,16 @@ def get_github_embeddings(model_name: str, base_url: str | None = None) -> objec
                 resp = requests.post(url, json=payload, headers=self.headers, timeout=30)
                 resp.raise_for_status()
             except RequestException as re:
-                raise RuntimeError(f"Failed to call GitHub embeddings endpoint {url}: {re}") from re
+                detail = ""
+                response = getattr(re, "response", None)
+                if response is not None:
+                    response_body = (response.text or "").strip()
+                    if response_body:
+                        detail = f" Response body: {response_body[:600]}"
+                raise RuntimeError(
+                    f"Failed to call GitHub embeddings endpoint {url}: {re}.{detail} "
+                    f"Ensure the selected model supports embeddings (for example: openai/text-embedding-3-small)."
+                ) from re
 
             data = resp.json()
 
@@ -458,7 +467,10 @@ def get_github_embeddings(model_name: str, base_url: str | None = None) -> objec
             return self._request(texts)
 
         def embed_query(self, text: str) -> list[float]:
-            return self._request([text])[0]
+            vectors = self._request([text])
+            if not vectors:
+                raise RuntimeError("GitHub embeddings endpoint returned no vectors for query input.")
+            return vectors[0]
 
         def __call__(self, text: str) -> list[float]:
             return self.embed_query(text)

@@ -83,6 +83,12 @@ from fin_ai.core.rag import load_embedding_metadata
 st.set_page_config(page_title="Financial Data Analysis", layout="wide")
 SIDEBAR_PREVIEW_WIDTH = 320
 
+
+def _looks_like_embedding_model(model_id: str) -> bool:
+    """Heuristic filter for embedding-capable model identifiers."""
+    mid = (model_id or "").strip().lower()
+    return "embedding" in mid or "embed" in mid
+
 # ---------------------------------------------------------------------------
 # Cached helpers
 # ---------------------------------------------------------------------------
@@ -255,7 +261,7 @@ available_chat_models, available_embedding_models, model_load_error = get_local_
 provider_label_to_key = {
     "Local Ollama": "ollama",
     "GitHub Models": "github",
-    "DeepSeek API": "deepseek",
+    "DeepSeek Models": "deepseek",
 }
 default_provider = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
 provider_labels = list(provider_label_to_key.keys())
@@ -307,7 +313,13 @@ if selected_emb_provider == "github":
     embedding_github_token = st.text_input("GitHub Token (Embeddings)", value=os.getenv("GITHUB_TOKEN", ""), type="password", key="embedding_github_token")
     with st.spinner("Fetching GitHub embedding models..."):
         emb_models = fetch_models("github", api_key=embedding_github_token)
-    available_embedding_models_display = [m.id for m in emb_models] if emb_models else [DEFAULT_GITHUB_EMBEDDING_MODEL, "openai/text-embedding-3-large"]
+    embedding_model_ids = [m.id for m in emb_models if _looks_like_embedding_model(m.id)]
+    available_embedding_models_display = embedding_model_ids if embedding_model_ids else [DEFAULT_GITHUB_EMBEDDING_MODEL, "openai/text-embedding-3-large"]
+    if emb_models and not embedding_model_ids:
+        st.warning(
+            "No embedding-capable GitHub models were detected from the catalog. "
+            "Using safe defaults to avoid 400 errors from /embeddings."
+        )
     default_emb_model_idx = available_embedding_models_display.index(DEFAULT_GITHUB_EMBEDDING_MODEL) if DEFAULT_GITHUB_EMBEDDING_MODEL in available_embedding_models_display else 0
     embeddings_base_url = os.getenv("GITHUB_EMBEDDING_BASE_URL", GITHUB_EMBEDDING_BASE_URL)
 else:
