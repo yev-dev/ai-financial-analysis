@@ -257,124 +257,120 @@ is_upload_mode = selected_vector_db == "Upload New Document"
 
 available_chat_models, available_embedding_models, model_load_error = get_local_model_options()
 
-# -- Chat provider selection -------------------------------------------------
-provider_label_to_key = {
-    "Local Ollama": "ollama",
-    "GitHub Models": "github",
-    "DeepSeek Models": "deepseek",
-}
-default_provider = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
-provider_labels = list(provider_label_to_key.keys())
-default_provider_index = next(
-    (i for i, k in enumerate(provider_labels) if provider_label_to_key[k] == default_provider), 0,
-)
-selected_provider_label = st.selectbox("Select Provider", provider_labels, index=default_provider_index, key="chat_provider")
-selected_provider = provider_label_to_key[selected_provider_label]
-github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
+# ---------------------------------------------------------------------------
+# -- Reasoning -----------------------------------------------------------
+# ---------------------------------------------------------------------------
+if not is_upload_mode:
+    st.sidebar.subheader("🧠 Reasoning")
+    st.sidebar.caption(
+        "Choose the LLM that will analyse the retrieved context and generate "
+        "answers. Select a provider, model, response format, and optional "
+        "financial data tools."
+    )
 
-# -- Model selection per provider --------------------------------------------
-if selected_provider == "github":
-    github_token = st.text_input("GitHub Token", value=os.getenv("GITHUB_TOKEN", ""), type="password", key="github_token_input")
-    with st.spinner("Fetching available GitHub models..."):
-        gh_models = fetch_models("github", api_key=github_token)
-    display_model_options = [m.id for m in gh_models] or [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
-    default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
-    default_chat_index = display_model_options.index(default_chat_model) if default_chat_model in display_model_options else 0
-    selected_model = st.selectbox("Select GitHub Model", display_model_options, index=default_chat_index, key="github_model")
-    github_endpoint = st.text_input("GitHub Endpoint", value=github_endpoint, key="github_endpoint_input")
+    provider_label_to_key = {
+        "Local Ollama": "ollama",
+        "GitHub Models": "github",
+        "DeepSeek Models": "deepseek",
+    }
+    default_provider = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
+    provider_labels = list(provider_label_to_key.keys())
+    default_provider_index = next(
+        (i for i, k in enumerate(provider_labels) if provider_label_to_key[k] == default_provider), 0,
+    )
+    selected_provider_label = st.sidebar.selectbox("Select Provider", provider_labels, index=default_provider_index, key="chat_provider")
+    selected_provider = provider_label_to_key[selected_provider_label]
+    github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
 
-elif selected_provider == "deepseek":
-    deepseek_token = os.getenv("DEEPSEEK_TOKEN", "")
-    with st.spinner("Fetching available DeepSeek models..."):
-        ds_models = fetch_models("deepseek", api_key=deepseek_token)
-    deepseek_model_ids = [m.id for m in ds_models]
-    if deepseek_model_ids:
-        default_ds = os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
-        default_ds_idx = deepseek_model_ids.index(default_ds) if default_ds in deepseek_model_ids else 0
-        selected_model = st.selectbox("Select DeepSeek Model", deepseek_model_ids, index=default_ds_idx, key="deepseek_model")
+    if selected_provider == "github":
+        github_token = st.sidebar.text_input("GitHub Token", value=os.getenv("GITHUB_TOKEN", ""), type="password", key="github_token_input")
+        with st.spinner("Fetching available GitHub models..."):
+            gh_models = fetch_models("github", api_key=github_token)
+        display_model_options = [m.id for m in gh_models] or [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
+        default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
+        default_chat_index = display_model_options.index(default_chat_model) if default_chat_model in display_model_options else 0
+        selected_model = st.sidebar.selectbox("Select GitHub Model", display_model_options, index=default_chat_index, key="github_model")
+        github_endpoint = st.sidebar.text_input("GitHub Endpoint", value=github_endpoint, key="github_endpoint_input")
+
+    elif selected_provider == "deepseek":
+        deepseek_token = os.getenv("DEEPSEEK_TOKEN", "")
+        with st.spinner("Fetching available DeepSeek models..."):
+            ds_models = fetch_models("deepseek", api_key=deepseek_token)
+        deepseek_model_ids = [m.id for m in ds_models]
+        if deepseek_model_ids:
+            default_ds = os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
+            default_ds_idx = deepseek_model_ids.index(default_ds) if default_ds in deepseek_model_ids else 0
+            selected_model = st.sidebar.selectbox("Select DeepSeek Model", deepseek_model_ids, index=default_ds_idx, key="deepseek_model")
+        else:
+            selected_model = st.sidebar.text_input("Select DeepSeek Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="deepseek_model_fallback")
+        deepseek_base_url = st.sidebar.text_input("DeepSeek Base URL", value=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL), key="deepseek_base_url_input")
+
     else:
-        selected_model = st.text_input("Select DeepSeek Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="deepseek_model_fallback")
-    deepseek_base_url = st.text_input("DeepSeek Base URL", value=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL), key="deepseek_base_url_input")
+        default_chat_model = os.getenv("OLLAMA_MODEL", DEFAULT_CHAT_MODEL)
+        default_chat_index = available_chat_models.index(default_chat_model) if default_chat_model in available_chat_models else 0
+        selected_model = st.sidebar.selectbox("Select Local Chat Model", available_chat_models, index=default_chat_index, key="ollama_chat_model")
 
-else:
-    default_chat_model = os.getenv("OLLAMA_MODEL", DEFAULT_CHAT_MODEL)
-    default_chat_index = available_chat_models.index(default_chat_model) if default_chat_model in available_chat_models else 0
-    selected_model = st.selectbox("Select Local Chat Model", available_chat_models, index=default_chat_index, key="ollama_chat_model")
+    response_type = st.sidebar.selectbox("Select Response Type", ["Plain Text", "Markdown", "Python Code"], index=1, key="response_type")
+    auto_truncate_prompt = st.sidebar.checkbox("Auto-truncate prompt (gpt-5 guard)", value=True)
+    use_tools = st.sidebar.checkbox("Enable function tools (financial data)", value=False)
 
-# -- Embedding provider selection -------------------------------------------
+    if use_tools:
+        with st.sidebar.expander("Available tools", expanded=False):
+            from fin_ai.agents.tools import YAHOO_FINANCE_TOOLS
+            for tool in YAHOO_FINANCE_TOOLS:
+                if tool.get("type") == "function":
+                    fn = tool["function"]
+                    st.sidebar.markdown(f"**`{fn['name']}`** — {fn.get('description', '')}")
+
+    if model_load_error:
+        st.sidebar.warning(model_load_error)
+
+    st.sidebar.divider()
+
+# ---------------------------------------------------------------------------
+# -- Embedding -----------------------------------------------------------
+# ---------------------------------------------------------------------------
+st.sidebar.subheader("📐 Embedding")
+st.sidebar.caption(
+    "Configure the model that converts your documents into vector "
+    "representations. Embeddings are used both when indexing new documents "
+    "and when retrieving relevant context during querying."
+)
+
 embeddings_provider_label_to_key = {"Local Ollama": "ollama", "GitHub Models": "github"}
 default_emb_provider = os.getenv("DEFAULT_EMBEDDINGS_PROVIDER", DEFAULT_EMBEDDINGS_PROVIDER).strip().lower()
 emb_labels = list(embeddings_provider_label_to_key.keys())
 default_emb_idx = next((i for i, k in enumerate(emb_labels) if embeddings_provider_label_to_key[k] == default_emb_provider), 0)
-selected_emb_provider_label = st.selectbox("Select Embedding Provider", emb_labels, index=default_emb_idx, key="emb_provider_select")
+selected_emb_provider_label = st.sidebar.selectbox("Select Embedding Provider", emb_labels, index=default_emb_idx, key="emb_provider_select")
 selected_emb_provider = embeddings_provider_label_to_key[selected_emb_provider_label]
 
 if selected_emb_provider == "github":
-    embedding_github_token = st.text_input("GitHub Token (Embeddings)", value=os.getenv("GITHUB_TOKEN", ""), type="password", key="embedding_github_token")
+    embedding_github_token = st.sidebar.text_input("GitHub Token (Embeddings)", value=os.getenv("GITHUB_TOKEN", ""), type="password", key="embedding_github_token")
     with st.spinner("Fetching GitHub embedding models..."):
         emb_models = fetch_models("github", api_key=embedding_github_token)
     embedding_model_ids = [m.id for m in emb_models if _looks_like_embedding_model(m.id)]
     available_embedding_models_display = embedding_model_ids if embedding_model_ids else [DEFAULT_GITHUB_EMBEDDING_MODEL, "openai/text-embedding-3-large"]
     if emb_models and not embedding_model_ids:
-        st.warning(
+        st.sidebar.warning(
             "No embedding-capable GitHub models were detected from the catalog. "
             "Using safe defaults to avoid 400 errors from /embeddings."
         )
     default_emb_model_idx = available_embedding_models_display.index(DEFAULT_GITHUB_EMBEDDING_MODEL) if DEFAULT_GITHUB_EMBEDDING_MODEL in available_embedding_models_display else 0
     embeddings_base_url = os.getenv("GITHUB_EMBEDDING_BASE_URL", GITHUB_EMBEDDING_BASE_URL)
 else:
-    ollama_emb_endpoint = st.text_input("Ollama Endpoint (Embeddings)", value=os.getenv("OLLAMA_ENDPOINT", OLLAMA_BASE_URL), key="embedding_ollama_endpoint")
+    ollama_emb_endpoint = st.sidebar.text_input("Ollama Endpoint (Embeddings)", value=os.getenv("OLLAMA_ENDPOINT", OLLAMA_BASE_URL), key="embedding_ollama_endpoint")
     available_embedding_models_display = available_embedding_models
     default_emb_model_idx = available_embedding_models_display.index(DEFAULT_EMBEDDING_MODEL) if DEFAULT_EMBEDDING_MODEL in available_embedding_models_display else 0
     embeddings_base_url = ollama_emb_endpoint
 
-selected_embedding_model = st.selectbox("Select Embedding Model", available_embedding_models_display, index=default_emb_model_idx, key="embedding_model")
+selected_embedding_model = st.sidebar.selectbox("Select Embedding Model", available_embedding_models_display, index=default_emb_model_idx, key="embedding_model")
 
+st.sidebar.divider()
+
+# -- Upload New Document (inside Embedding section) -------------------------
 if is_upload_mode:
-    selected_source_type = st.selectbox("Type of Source Document", SUPPORTED_UPLOAD_TYPES, index=0, key="source_type")
-
-# -- Response type & options -------------------------------------------------
-response_type = st.selectbox("Select Response Type", ["Plain Text", "Markdown", "Python Code"], index=1, key="response_type")
-auto_truncate_prompt = st.checkbox("Auto-truncate prompt (gpt-5 guard)", value=True)
-use_tools = st.checkbox("Enable function tools (financial data)", value=False)
-
-if use_tools:
-    with st.expander("Available tools", expanded=False):
-        from fin_ai.agents.tools import YAHOO_FINANCE_TOOLS
-        for tool in YAHOO_FINANCE_TOOLS:
-            if tool.get("type") == "function":
-                fn = tool["function"]
-                st.markdown(f"**`{fn['name']}`** — {fn.get('description', '')}")
-
-if model_load_error:
-    st.warning(model_load_error)
-
-st.caption("Use the same embedding model that was used when the vector DB was created.")
-
-# -- Maintenance (purge) ----------------------------------------------------
-if not is_upload_mode:
-    with st.expander("Maintenance", expanded=False):
-        st.warning("This permanently deletes the selected vector DB and related files.")
-        confirm_purge = st.checkbox(f"Confirm purge of '{selected_vector_db}'", key=f"confirm_purge_{selected_vector_db}")
-        if st.button("Purge Vector DB", type="secondary", disabled=not confirm_purge, key=f"purge_vector_db_{selected_vector_db}"):
-            deleted = purge_vector_db(selected_vector_db)
-            if deleted:
-                st.session_state["question_history"] = []
-                st.session_state.pop("latest_response", None)
-                st.success(f"Purged vector DB '{selected_vector_db}'.")
-                st.rerun()
-            else:
-                st.warning(f"No files found to purge for '{selected_vector_db}'.")
-
-# -- History management -----------------------------------------------------
-history_vector_db = selected_vector_db if not is_upload_mode else "__upload__"
-if st.session_state.get("history_vector_db") != history_vector_db:
-    st.session_state["history_vector_db"] = history_vector_db
-    st.session_state["question_history"] = load_history(history_vector_db)
-
-# -- Upload mode ------------------------------------------------------------
-if is_upload_mode:
-    uploaded_file = st.file_uploader("Upload a document for analysis", type=SUPPORTED_UPLOAD_TYPES)
+    selected_source_type = st.sidebar.selectbox("Type of Source Document", SUPPORTED_UPLOAD_TYPES, index=0, key="source_type")
+    uploaded_file = st.sidebar.file_uploader("Upload a document for analysis", type=SUPPORTED_UPLOAD_TYPES)
     if uploaded_file:
         binary = uploaded_file.getvalue()
         suffix = Path(uploaded_file.name).suffix.lower()
@@ -388,9 +384,8 @@ if is_upload_mode:
         else:
             st.sidebar.info(f"Preview is not available for {suffix} files.")
 
-        if st.button("Process Document and Store in Vector DB"):
+        if st.sidebar.button("Process Document and Store in Vector DB"):
             with st.spinner("Processing document..."):
-                # Set embedding token in env before processing
                 if selected_emb_provider == "github":
                     os.environ["GITHUB_TOKEN"] = embedding_github_token
                 result = process_uploaded_document(
@@ -405,39 +400,56 @@ if is_upload_mode:
                 st.caption(f"Document processing completed in {result['elapsed']:.2f} seconds.")
                 st.rerun()
 
-# -- Query configuration ----------------------------------------------------
-query_source_configs: list = []
-selected_source_names: list[str] = []
-
-if selected_vector_db != "Upload New Document":
-    with st.expander("Previous Questions", expanded=False):
-        history = st.session_state.get("question_history", [])
-        if not history:
-            st.caption("No saved question history yet for this vector DB.")
-        else:
-            if st.button("Clear History", key=f"clear_history_{history_vector_db}"):
-                clear_history(history_vector_db)
-                st.session_state["question_history"] = []
-                st.rerun()
-            for idx, item in enumerate(history[:10], start=1):
-                st.markdown(f"**Q:** {item['question']}")
-                st.caption(f"Model: {item['chat_model']} | Embedding: {item['embedding_model']} | Type: {item.get('response_type', 'Markdown')} | Mode: {item.get('retrieval_mode', 'ensemble')} | Time: {item['answer_seconds']:.2f}s")
-                if item.get("answer"):
-                    render_response_output(item["answer"], item.get("response_type", "Markdown"), panel_key=f"history_{history_vector_db}_{idx}")
-                    render_source_citations(item.get("citations"), item.get("response_type", "Markdown"))
-                if st.button("Reuse Question", key=f"reuse_question_{history_vector_db}_{idx}"):
-                    st.session_state["question_input"] = item["question"]
-                    st.rerun()
-
-    # -- Source selection & retrieval settings --------------------------------
-    selected_query_vector_dbs = st.multiselect("Query Vector DB Sources", vector_db_names, default=[selected_vector_db], key="query_vector_dbs")
+# -- Query widgets (defaults: initialised here for sidebar use,
+# the actual widgets are rendered in the main panel below).
+selected_query_vector_dbs: list[str] = []
+retrieval_mode: str = "ensemble"
+source_grouping: str = "vector_db"
+if not is_upload_mode:
+    selected_query_vector_dbs = st.session_state.get("query_vector_dbs", [selected_vector_db])
     if not selected_query_vector_dbs:
         selected_query_vector_dbs = [selected_vector_db]
     if selected_vector_db not in selected_query_vector_dbs:
         selected_query_vector_dbs = [selected_vector_db] + selected_query_vector_dbs
+    source_grouping = st.session_state.get("source_grouping", "vector_db")
+    retrieval_mode = st.session_state.get("retrieval_mode", "ensemble")
 
-    retrieval_mode = st.selectbox("Retrieval Mode", ["ensemble", "separate", "routed"], index=0, key="retrieval_mode")
-    source_grouping = st.selectbox("Group Sources By", ["vector_db", "filename", "source_type", "source"], index=0, key="source_grouping")
+# ---------------------------------------------------------------------------
+# -- Querying (sidebar: history, retrieval settings, embeddings) ---------
+# ---------------------------------------------------------------------------
+if not is_upload_mode:
+    # -- History management -------------------------------------------------
+    history_vector_db = selected_vector_db
+    # Always reload history from disk so newly saved entries appear immediately.
+    st.session_state["question_history"] = load_history(history_vector_db)
+    st.session_state["history_vector_db"] = history_vector_db
+
+    with st.sidebar.expander("Previous Questions", expanded=False):
+        history = st.session_state.get("question_history", [])
+        if not history:
+            st.sidebar.caption("No saved question history yet for this vector DB.")
+        else:
+            if st.sidebar.button("Clear History", key=f"clear_history_{history_vector_db}"):
+                clear_history(history_vector_db)
+                st.session_state["question_history"] = []
+                st.rerun()
+            for idx, item in enumerate(history[:10], start=1):
+                with st.sidebar.expander(f"Q{idx}: {item['question'][:80]}{'...' if len(item['question']) > 80 else ''}", expanded=False):
+                    st.sidebar.caption(f"Model: {item['chat_model']} | Embedding: {item['embedding_model']} | Type: {item.get('response_type', 'Markdown')} | Mode: {item.get('retrieval_mode', 'ensemble')} | Time: {item['answer_seconds']:.2f}s")
+
+    # -- Maintenance (purge) ------------------------------------------------
+    with st.sidebar.expander("Maintenance", expanded=False):
+        st.sidebar.warning("This permanently deletes the selected vector DB and related files.")
+        confirm_purge = st.sidebar.checkbox(f"Confirm purge of '{selected_vector_db}'", key=f"confirm_purge_{selected_vector_db}")
+        if st.sidebar.button("Purge Vector DB", type="secondary", disabled=not confirm_purge, key=f"purge_vector_db_{selected_vector_db}"):
+            deleted = purge_vector_db(selected_vector_db)
+            if deleted:
+                st.session_state["question_history"] = []
+                st.session_state.pop("latest_response", None)
+                st.success(f"Purged vector DB '{selected_vector_db}'.")
+                st.rerun()
+            else:
+                st.sidebar.warning(f"No files found to purge for '{selected_vector_db}'.")
 
     # -- Embeddings for query ------------------------------------------------
     saved_emb_meta = load_embedding_metadata(selected_vector_db)
@@ -445,7 +457,7 @@ if selected_vector_db != "Upload New Document":
         actual_emb_provider = saved_emb_meta["provider"]
         actual_emb_model = saved_emb_meta["model"]
         actual_emb_base_url = saved_emb_meta["base_url"]
-        st.caption(f"🔖 Using saved embedding config for **{selected_vector_db}**: `{actual_emb_provider}/{actual_emb_model} @ {actual_emb_base_url}`")
+        st.sidebar.caption(f"🔖 Using saved embedding config for **{selected_vector_db}**: `{actual_emb_provider}/{actual_emb_model} @ {actual_emb_base_url}`")
         if actual_emb_provider == "github":
             os.environ["GITHUB_TOKEN"] = embedding_github_token
         embeddings = get_embeddings(actual_emb_model, actual_emb_base_url, provider=actual_emb_provider)
@@ -453,14 +465,19 @@ if selected_vector_db != "Upload New Document":
         if selected_emb_provider == "github":
             os.environ["GITHUB_TOKEN"] = embedding_github_token
         embeddings = get_embeddings(selected_embedding_model, embeddings_base_url, provider=selected_emb_provider)
-        st.caption(f"Using current embedding selection: `{selected_emb_provider}/{selected_embedding_model} @ {embeddings_base_url}`")
+        st.sidebar.caption(f"Using current embedding selection: `{selected_emb_provider}/{selected_embedding_model} @ {embeddings_base_url}`")
 
     # -- Load vector stores --------------------------------------------------
-    loaded_stores = load_vector_stores_for_query(selected_query_vector_dbs, source_vector_stores, embeddings)
+    try:
+        loaded_stores = load_vector_stores_for_query(selected_query_vector_dbs, source_vector_stores, embeddings)
+    except ValueError as e:
+        st.sidebar.error(str(e))
+        loaded_stores = {}
     vector_store = loaded_stores.get(selected_vector_db)
 
     if vector_store is None:
-        st.sidebar.warning(f"Vector DB '{selected_vector_db}' not found.")
+        if selected_vector_db not in loaded_stores:
+            st.sidebar.warning(f"Vector DB '{selected_vector_db}' not found.")
     else:
         source_doc = find_source_document(selected_vector_db)
         if source_doc and source_doc.suffix.lower() == ".pdf":
@@ -473,7 +490,29 @@ if selected_vector_db != "Upload New Document":
         query_source_configs = build_query_source_configs(loaded_stores, group_by=source_grouping)
 
         available_source_names = [c.name for c in query_source_configs]
-        selected_source_names = st.multiselect("Restrict to Source Groups", available_source_names, default=available_source_names, key="restrict_sources")
+
+# -- Query Vector DB Sources & retrieval settings (main panel) ---------------
+if selected_vector_db != "Upload New Document":
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.multiselect(
+            "Query Vector DB Sources",
+            vector_db_names,
+            default=[selected_vector_db],
+            key="query_vector_dbs",
+        )
+    with col2:
+        retrieval_mode = st.selectbox("Retrieval Mode", ["ensemble", "separate", "routed"], index=0, key="retrieval_mode")
+    with col3:
+        source_grouping = st.selectbox("Group Sources By", ["vector_db", "filename", "source_type", "source"], index=0, key="source_grouping")
+
+    if available_source_names:
+        selected_source_names = st.multiselect(
+            "Restrict to Source Groups",
+            available_source_names,
+            default=available_source_names,
+            key="restrict_sources",
+        )
 
 # -- Question input ---------------------------------------------------------
 question = ""

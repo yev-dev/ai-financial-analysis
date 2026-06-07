@@ -18,7 +18,10 @@ warnings.filterwarnings(
 
 from langchain_community.vectorstores import FAISS
 from langchain_community.docstore.in_memory import InMemoryDocstore
-from langchain_text_splitters import MarkdownHeaderTextSplitter
+from langchain_text_splitters import (
+    MarkdownHeaderTextSplitter,
+    RecursiveCharacterTextSplitter,
+)
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.prompts import ChatPromptTemplate
@@ -487,6 +490,9 @@ def _create_source_metadata(file_path, source_type: str = "file"):
 def get_markdown_splits(markdown_content, metadata: dict = None):
     """Split markdown content into chunks and add metadata to each chunk.
     
+    First splits by markdown headers (H1-H3), then further splits any chunks
+    that exceed the token limit using a recursive character splitter.
+    
     Args:
         markdown_content: Markdown formatted string to split
         metadata: Optional metadata dictionary to attach to all chunks
@@ -498,28 +504,47 @@ def get_markdown_splits(markdown_content, metadata: dict = None):
     splitter = MarkdownHeaderTextSplitter(headers_to_split_on, strip_headers=False)
     splits = splitter.split_text(markdown_content)
     
+    # Secondary splitter: break down any chunks that are too large for the
+    # embedding model's token limit (8192 tokens).  We use a conservative
+    # chunk size (~2000 chars ≈ 500 tokens) to keep plenty of headroom.
+    char_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=2000,
+        chunk_overlap=200,
+        length_function=len,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+    
     # Convert to Document objects and add metadata
     if metadata is None:
         metadata = {}
     
     documents = []
     for idx, split in enumerate(splits):
-        # Merge metadata with section metadata
-        doc_metadata = {
-            **metadata,
-            "chunk_index": idx,
-            "chunk_count": len(splits),
-        }
+        chunk_text = split.page_content if hasattr(split, 'page_content') else str(split)
         
-        # Add header information if available
-        if hasattr(split, 'metadata'):
-            doc_metadata.update(split.metadata)
+        # Further split if the chunk is too large (rough heuristic: 8192 tokens ≈ 32k chars)
+        if len(chunk_text) > 24000:
+            sub_splits = char_splitter.split_text(chunk_text)
+        else:
+            sub_splits = [chunk_text]
         
-        doc = Document(
-            page_content=split.page_content if hasattr(split, 'page_content') else split,
-            metadata=doc_metadata
-        )
-        documents.append(doc)
+        for sub_idx, sub_text in enumerate(sub_splits):
+            doc_metadata = {
+                **metadata,
+                "chunk_index": idx,
+                "sub_chunk_index": sub_idx,
+                "chunk_count": len(splits),
+            }
+            
+            # Add header information if available
+            if hasattr(split, 'metadata'):
+                doc_metadata.update(split.metadata)
+            
+            doc = Document(
+                page_content=sub_text,
+                metadata=doc_metadata,
+            )
+            documents.append(doc)
     
     return documents
 

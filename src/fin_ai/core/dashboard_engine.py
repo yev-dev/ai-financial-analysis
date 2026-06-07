@@ -16,6 +16,8 @@ from typing import Any, Sequence
 
 from langchain_community.vectorstores import FAISS
 
+import logging
+
 from fin_ai.core.request import ModelRequest, RequestPayload
 from fin_ai.core.query import (
     SourceRetrieverConfig,
@@ -23,6 +25,8 @@ from fin_ai.core.query import (
     build_source_retriever_configs,
     format_source_citations,
 )
+
+logger = logging.getLogger(__name__)
 from fin_ai.core.rag import (
     create_or_load_vector_store,
     discover_vector_stores_by_source,
@@ -200,8 +204,15 @@ def load_vector_stores_for_query(
     """Load FAISS vector stores for the selected names.
 
     Each store is loaded with the provided ``embeddings`` instance.
+    After loading, a dimension sanity-check is performed: the embedding
+    vector dimension produced by *embeddings* must match the FAISS index
+    dimension, otherwise a ``ValueError`` is raised with a clear message.
     """
+    import faiss
+
     loaded: dict[str, FAISS] = {}
+    _dims_checked: dict[str, int] = {}  # cache: embedding dimension per name
+
     for name in selected_vector_db_names:
         if name not in source_vector_stores:
             continue
@@ -209,7 +220,30 @@ def load_vector_stores_for_query(
         if not vs_path.exists():
             continue
         faiss_load_dir = str(vs_path.parent) if vs_path.is_file() else str(vs_path)
-        loaded[name] = FAISS.load_local(faiss_load_dir, embeddings=embeddings, allow_dangerous_deserialization=True)
+
+        vs = FAISS.load_local(faiss_load_dir, embeddings=embeddings, allow_dangerous_deserialization=True)
+
+        # -- Dimension sanity check -----------------------------------------
+        index_d = vs.index.d
+        if name not in _dims_checked:
+            # Probe the embedding dimension once per unique embedding config
+            probe = embeddings.embed_query("dimension probe")
+            emb_d = len(probe)
+            _dims_checked[name] = emb_d
+        else:
+            emb_d = _dims_checked[name]
+
+        if emb_d != index_d:
+            raise ValueError(
+                f"Embedding dimension mismatch for vector store '{name}': "
+                f"the FAISS index has dimension {index_d}, but the selected "
+                f"embedding model produces vectors of dimension {emb_d}. "
+                f"Use the same embedding model that was used to create the "
+                f"vector store."
+            )
+
+        loaded[name] = vs
+
     return loaded
 
 
