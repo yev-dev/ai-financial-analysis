@@ -1,12 +1,15 @@
 import os
 from dataclasses import asdict
+import json
 
 import streamlit as st
 
 # Import dashboard first so dashboard/__init__.py runs and bootstraps paths.
-from dashboard import DEFAULT_GITHUB_MODEL
+from dashboard import DEFAULT_GITHUB_MODEL, DEFAULT_DEEPSEEK_MODEL, DEEPSEEK_BASE_URL
+from fin_ai.core.providers import list_models
 from fin_ai.core.request import ModelRequest, RequestPayload
-from fin_ai.core.response import ResponseFactory
+from fin_ai.core.response import ResponseFactory, ResponseMetadata
+from fin_ai.agents.tools import YAHOO_FINANCE_TOOLS, LITELLM_TOOL_FUNCTIONS
 
 
 st.set_page_config(page_title="LiteLLM Chat", layout="wide")
@@ -16,17 +19,101 @@ st.caption("Query either GitHub Models or local Ollama using fin_ai.core request
 provider_label_to_key = {
     "GitHub Models": "github",
     "Local Ollama": "ollama",
+    "DeepSeek API": "deepseek",
 }
+
+
+def _build_tool_aware_system_prompt(base_prompt: str | None) -> str:
+    tool_names = [
+        tool.get("function", {}).get("name", "")
+        for tool in YAHOO_FINANCE_TOOLS
+        if tool.get("type") == "function"
+    ]
+    tool_names = [name for name in tool_names if name]
+    available_tools = ", ".join(tool_names) if tool_names else "none"
+
+    tool_guidance = (
+        "You have access to function tools via YAHOO_FINANCE_TOOLS. "
+        f"Available tools: {available_tools}. "
+        "When the user asks for stock prices, company facts, dividends, financial statements, "
+        "or analyst recommendations, call the most appropriate tool instead of guessing. "
+        "Use the exact tool arguments required by the schema. "
+        "After tool output is returned, summarize clearly and reference the returned data."
+    )
+
+    base = (base_prompt or "").strip()
+    if tool_guidance in base:
+        return base
+    if not base:
+        return tool_guidance
+    return f"{base}\n\n{tool_guidance}"
+
+
+def _extract_tool_calls(message: object) -> list[dict]:
+    tool_calls = getattr(message, "tool_calls", None)
+    if not tool_calls:
+        return []
+
+    extracted: list[dict] = []
+    for tool_call in tool_calls:
+        if isinstance(tool_call, dict):
+            function_payload = tool_call.get("function", {})
+            name = function_payload.get("name")
+            arguments_text = function_payload.get("arguments", "{}")
+            call_id = tool_call.get("id")
+        else:
+            function_payload = getattr(tool_call, "function", None)
+            name = getattr(function_payload, "name", None)
+            arguments_text = getattr(function_payload, "arguments", "{}")
+            call_id = getattr(tool_call, "id", None)
+
+        try:
+            arguments = json.loads(arguments_text or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+
+        extracted.append(
+            {
+                "id": call_id or f"call_{len(extracted)}",
+                "name": name,
+                "arguments": arguments,
+                "arguments_text": arguments_text or "{}",
+            }
+        )
+
+    return extracted
+
+
+def _execute_tool(name: str | None, arguments: dict) -> dict:
+    if not name:
+        return {"error": "Missing tool name"}
+
+    tool_function = LITELLM_TOOL_FUNCTIONS.get(name)
+    if tool_function is None:
+        return {"error": f"Unsupported tool: {name}"}
+
+    try:
+        return tool_function(**arguments)
+    except TypeError as exc:
+        return {"error": f"Invalid arguments for {name}: {exc}"}
+    except Exception as exc:
+        return {"error": str(exc)}
 
 with st.sidebar:
     st.header("Settings")
-    provider_label = st.selectbox("Provider", list(provider_label_to_key.keys()), index=0)
+    default_provider = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
+    provider_labels = list(provider_label_to_key.keys())
+    default_provider_index = next(
+        (i for i, k in enumerate(provider_labels) if provider_label_to_key[k] == default_provider),
+        0,
+    )
+    provider_label = st.selectbox("Provider", provider_labels, index=default_provider_index)
     provider = provider_label_to_key[provider_label]
 
     response_format = st.selectbox(
         "Response Format",
         ResponseFactory.available(),
-        index=0,
+        index=ResponseFactory.available().index("markdown") if "markdown" in ResponseFactory.available() else 0,
         help="Rendering style implemented by fin_ai.core.response wrappers.",
     )
 
@@ -39,17 +126,89 @@ with st.sidebar:
     )
     st.text_input("Proxy Port (optional)", value=os.getenv("PX_PROXY_PORT", ""), key="proxy_port_input")
 
+    # ---- Dynamic model listing based on selected provider ----
     if provider == "github":
-        st.text_input("GitHub Model", value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL), key="github_model")
+        github_token = st.text_input(
+            "GitHub Token",
+            value=os.getenv("GITHUB_TOKEN", ""),
+            type="password",
+            key="github_token",
+        )
+        with st.spinner("Fetching available GitHub models..."):
+            gh_models = list_models("github", api_key=github_token)
+        gh_model_ids = [m.id for m in gh_models]
+        if gh_model_ids:
+            default_gh = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
+            default_gh_idx = gh_model_ids.index(default_gh) if default_gh in gh_model_ids else 0
+            st.selectbox(
+                "GitHub Model",
+                gh_model_ids,
+                index=default_gh_idx,
+                key="github_model",
+            )
+        else:
+            st.text_input(
+                "GitHub Model",
+                value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL),
+                key="github_model",
+            )
+            st.caption("No models found. Check your token or enter a model name manually.")
         st.text_input(
             "GitHub Endpoint",
             value=os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference"),
             key="github_endpoint",
         )
-        st.text_input("GitHub Token", value=os.getenv("GITHUB_TOKEN", ""), type="password", key="github_token")
+    elif provider == "deepseek":
+        deepseek_token = os.getenv("DEEPSEEK_TOKEN", "")
+        with st.spinner("Fetching available DeepSeek models..."):
+            ds_models = list_models("deepseek", api_key=deepseek_token)
+        ds_model_ids = [m.id for m in ds_models]
+        if ds_model_ids:
+            default_ds = os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
+            default_ds_idx = ds_model_ids.index(default_ds) if default_ds in ds_model_ids else 0
+            st.selectbox(
+                "DeepSeek Model",
+                ds_model_ids,
+                index=default_ds_idx,
+                key="deepseek_model",
+            )
+        else:
+            st.text_input(
+                "DeepSeek Model",
+                value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL),
+                key="deepseek_model",
+            )
+            st.caption("No models found. Check your token or enter a model name manually.")
+        st.text_input(
+            "DeepSeek Base URL",
+            value=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
+            key="deepseek_base_url",
+        )
     else:
-        st.text_input("Ollama Model", value=os.getenv("OLLAMA_MODEL", "llama3.1"), key="ollama_model")
-        st.text_input("Ollama Endpoint", value=os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434"), key="ollama_endpoint")
+        ollama_endpoint = st.text_input(
+            "Ollama Endpoint",
+            value=os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434"),
+            key="ollama_endpoint",
+        )
+        with st.spinner("Fetching available Ollama models..."):
+            ol_models = list_models("ollama", base_url=ollama_endpoint)
+        ol_model_ids = [m.id for m in ol_models]
+        if ol_model_ids:
+            default_ol = os.getenv("OLLAMA_MODEL", "llama3.1")
+            default_ol_idx = ol_model_ids.index(default_ol) if default_ol in ol_model_ids else 0
+            st.selectbox(
+                "Ollama Model",
+                ol_model_ids,
+                index=default_ol_idx,
+                key="ollama_model",
+            )
+        else:
+            st.text_input(
+                "Ollama Model",
+                value=os.getenv("OLLAMA_MODEL", "llama3.1"),
+                key="ollama_model",
+            )
+            st.caption("No models found. Is Ollama running?")
 
 system_prompt = st.text_area(
     "System Prompt",
@@ -58,9 +217,13 @@ system_prompt = st.text_area(
 )
 user_prompt = st.text_area(
     "User Prompt",
-    value="What are the top three indicators of financial health for a public company?",
+    value="Use tools to summarize company info and latest analyst recommendations for AAPL.",
     height=140,
 )
+
+effective_system_prompt = _build_tool_aware_system_prompt(system_prompt)
+with st.expander("Effective System Prompt (with tool guidance)", expanded=False):
+    st.code(effective_system_prompt)
 
 if st.button("Send", type="primary"):
     if not user_prompt.strip():
@@ -70,6 +233,10 @@ if st.button("Send", type="primary"):
             os.environ["GITHUB_MODEL"] = st.session_state["github_model"]
             os.environ["GITHUB_ENDPOINT"] = st.session_state["github_endpoint"]
             os.environ["GITHUB_TOKEN"] = st.session_state["github_token"]
+        elif provider == "deepseek":
+            os.environ["DEEPSEEK_MODEL"] = st.session_state["deepseek_model"]
+            os.environ["DEEPSEEK_BASE_URL"] = st.session_state["deepseek_base_url"]
+            os.environ["DEEPSEEK_TOKEN"] = deepseek_token
         else:
             os.environ["OLLAMA_MODEL"] = st.session_state["ollama_model"]
             os.environ["OLLAMA_ENDPOINT"] = st.session_state["ollama_endpoint"]
@@ -85,15 +252,70 @@ if st.button("Send", type="primary"):
 
         payload = RequestPayload(
             prompt=user_prompt.strip(),
-            system_prompt=system_prompt.strip() or None,
+            system_prompt=effective_system_prompt,
             temperature=float(temperature),
             max_tokens=int(max_tokens) if max_tokens > 0 else None,
             proxy_port=proxy_port,
             auto_truncate_prompt=bool(auto_truncate_prompt),
+            tools=YAHOO_FINANCE_TOOLS,
         )
 
         try:
-            response = ModelRequest(provider=provider, format=response_format).request(payload)
+            requester = ModelRequest(provider=provider, format=response_format)
+            response = requester.request(payload)
+
+            first_raw = response.get_metadata().raw_response
+            first_message = first_raw.choices[0].message
+            tool_calls = _extract_tool_calls(first_message)
+
+            if tool_calls:
+                follow_up_messages = []
+                if payload.system_prompt:
+                    follow_up_messages.append({"role": "system", "content": payload.system_prompt})
+                follow_up_messages.append({"role": "user", "content": payload.prompt})
+                follow_up_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": first_message.content or "",
+                        "tool_calls": [
+                            {
+                                "id": tool_call["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call["name"],
+                                    "arguments": tool_call["arguments_text"],
+                                },
+                            }
+                            for tool_call in tool_calls
+                        ],
+                    }
+                )
+
+                for tool_call in tool_calls:
+                    tool_result = _execute_tool(tool_call["name"], tool_call["arguments"])
+                    follow_up_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "name": tool_call["name"] or "unknown_tool",
+                            "content": json.dumps(tool_result),
+                        }
+                    )
+
+                follow_up_payload = RequestPayload(
+                    prompt=payload.prompt,
+                    system_prompt=payload.system_prompt,
+                    temperature=payload.temperature,
+                    max_tokens=payload.max_tokens,
+                    proxy_port=payload.proxy_port,
+                    auto_truncate_prompt=payload.auto_truncate_prompt,
+                    tools=YAHOO_FINANCE_TOOLS,
+                    messages=follow_up_messages,
+                )
+                response = requester.client.send(
+                    follow_up_payload,
+                    response_class=requester.response_class,
+                )
         except Exception as exc:
             st.exception(exc)
         else:

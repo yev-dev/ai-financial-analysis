@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, Sequence
 
 from langchain_core.documents import Document
 
+from .request import count_message_tokens, get_model_safe_input_budget, resolve_model_name, trim_text_to_tokens
 from .rag import filter_documents_by_metadata
 
 if TYPE_CHECKING:
@@ -93,6 +94,13 @@ class SourceCitation:
     chunk_indices: list[int]
     section_headers: list[str]
     document_count: int
+
+
+OVERSIZED_PROMPT_SUMMARY_SYSTEM_PROMPT = (
+    "You compress retrieved financial evidence into concise factual notes. "
+    "Preserve figures, dates, comparisons, caveats, and explicit uncertainties. "
+    "Do not add new facts."
+)
 
 
 def build_source_retriever_configs(
@@ -512,6 +520,8 @@ def query_with_multi_source_prompting(
     max_sources: int | None = None,
     use_llm_planner: bool = False,
     planner_provider: Provider | None = None,
+    auto_truncate_prompt: bool = True,
+    tools: list[dict[str, Any]] | None = None,
 ) -> MultiSourcePromptResult:
     """Retrieve across sources, build prompts, and execute a model request."""
     retrieval = retrieve_multi_source_documents(
@@ -526,6 +536,17 @@ def query_with_multi_source_prompting(
     )
     prompt = build_multi_source_prompt(query, retrieval)
     source_prompts = build_source_specific_prompts(query, retrieval)
+    prompt = _compress_prompt_for_oversized_requests(
+        query,
+        retrieval,
+        prompt,
+        provider=provider,
+        system_prompt=system_prompt or "You are a helpful financial analysis assistant.",
+        temperature=temperature,
+        max_tokens=max_tokens,
+        proxy_port=proxy_port,
+        auto_truncate_prompt=auto_truncate_prompt,
+    )
     response = _run_model_request(
         provider=provider,
         response_format=response_format,
@@ -534,6 +555,8 @@ def query_with_multi_source_prompting(
         temperature=temperature,
         max_tokens=max_tokens,
         proxy_port=proxy_port,
+        auto_truncate_prompt=auto_truncate_prompt,
+        tools=tools,
     )
     return MultiSourcePromptResult(
         retrieval=retrieval,
@@ -541,6 +564,184 @@ def query_with_multi_source_prompting(
         source_prompts=source_prompts,
         response=response,
     )
+
+
+def _compress_prompt_for_oversized_requests(
+    query: str,
+    retrieval: MultiSourceQueryResult,
+    prompt: str,
+    *,
+    provider: Provider,
+    system_prompt: str,
+    temperature: float,
+    max_tokens: int | None,
+    proxy_port: int | None,
+    auto_truncate_prompt: bool,
+) -> str:
+    model_name = resolve_model_name(provider)
+    safe_budget = get_model_safe_input_budget(model_name)
+    if safe_budget is None:
+        return prompt
+
+    prompt_tokens = count_message_tokens(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+    )
+    if prompt_tokens <= safe_budget:
+        return prompt
+
+    compressed_summaries = _summarize_retrieval_for_question(
+        query,
+        retrieval,
+        provider=provider,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        proxy_port=proxy_port,
+        auto_truncate_prompt=auto_truncate_prompt,
+        safe_budget=safe_budget,
+    )
+    return _build_compressed_multi_source_prompt(query, retrieval, compressed_summaries)
+
+
+def _summarize_retrieval_for_question(
+    query: str,
+    retrieval: MultiSourceQueryResult,
+    *,
+    provider: Provider,
+    temperature: float,
+    max_tokens: int | None,
+    proxy_port: int | None,
+    auto_truncate_prompt: bool,
+    safe_budget: int,
+) -> dict[str, list[str]]:
+    compressed: dict[str, list[str]] = {}
+    for source_result in retrieval.source_results:
+        if not source_result.documents:
+            compressed[source_result.source_name] = ["No matching documents retrieved."]
+            continue
+
+        batch_prompts = _build_summary_batch_prompts(query, source_result, safe_budget)
+        source_summaries: list[str] = []
+        for batch_prompt in batch_prompts:
+            summary_response = _run_model_request(
+                provider=provider,
+                response_format="text",
+                prompt=batch_prompt,
+                system_prompt=OVERSIZED_PROMPT_SUMMARY_SYSTEM_PROMPT,
+                temperature=min(temperature, 0.2),
+                max_tokens=min(max_tokens, 400) if max_tokens is not None else 400,
+                proxy_port=proxy_port,
+                auto_truncate_prompt=auto_truncate_prompt,
+                tools=None,
+            )
+            source_summaries.append(summary_response.content.strip() or "Insufficient evidence.")
+        compressed[source_result.source_name] = source_summaries or ["Insufficient evidence."]
+    return compressed
+
+
+def _build_summary_batch_prompts(
+    query: str,
+    source_result: SourceRetrievalResult,
+    safe_budget: int,
+) -> list[str]:
+    base_prompt = "\n".join(
+        [
+            f"Question: {query}",
+            f"Source: {source_result.source_name}",
+            "Compress the following retrieved evidence into concise bullet points.",
+            "Requirements:",
+            "- Keep only evidence relevant to the question.",
+            "- Preserve figures, dates, percentages, and directional changes.",
+            "- Mention conflicts, caveats, or uncertainty explicitly.",
+            "- End with 'Insufficient evidence.' if the batch does not support the question.",
+            "",
+            "Retrieved Evidence:",
+            "",
+        ]
+    )
+    batch_budget = _derive_summary_batch_budget(safe_budget)
+    base_tokens = count_message_tokens(
+        [
+            {"role": "system", "content": OVERSIZED_PROMPT_SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": base_prompt},
+        ]
+    )
+    available_block_tokens = max(64, batch_budget - base_tokens)
+
+    prompts: list[str] = []
+    current_blocks: list[str] = []
+    for index, document in enumerate(source_result.documents, start=1):
+        block = "\n".join(_format_document_block(document, index=index)).strip()
+        candidate_blocks = current_blocks + [block]
+        candidate_prompt = _render_summary_batch_prompt(base_prompt, candidate_blocks)
+        candidate_tokens = count_message_tokens(
+            [
+                {"role": "system", "content": OVERSIZED_PROMPT_SUMMARY_SYSTEM_PROMPT},
+                {"role": "user", "content": candidate_prompt},
+            ]
+        )
+        if current_blocks and candidate_tokens > batch_budget:
+            prompts.append(_render_summary_batch_prompt(base_prompt, current_blocks))
+            current_blocks = []
+
+        trimmed_block = trim_text_to_tokens(block, available_block_tokens)
+        if trimmed_block:
+            current_blocks.append(trimmed_block)
+
+    if current_blocks:
+        prompts.append(_render_summary_batch_prompt(base_prompt, current_blocks))
+
+    return prompts or [base_prompt + "No retrieved evidence."]
+
+
+def _derive_summary_batch_budget(safe_budget: int) -> int:
+    return max(128, min(safe_budget - 64, int(safe_budget * 0.65)))
+
+
+def _render_summary_batch_prompt(base_prompt: str, blocks: Sequence[str]) -> str:
+    return base_prompt + "\n\n".join(blocks)
+
+
+def _build_compressed_multi_source_prompt(
+    query: str,
+    retrieval: MultiSourceQueryResult,
+    compressed_summaries: dict[str, list[str]],
+) -> str:
+    lines = [
+        "You are an assistant for financial analysis using compressed multi-source evidence.",
+        "Compare evidence across sources, note disagreements, and cite the supporting source names inline using [Source: source_name].",
+        "If evidence is missing for a source, say so explicitly.",
+        "",
+        f"Question: {query}",
+        "",
+        "Compressed Source Summaries:",
+    ]
+
+    if retrieval.routing_decision and retrieval.routing_decision.reasoning:
+        lines.append(f"Routing rationale: {retrieval.routing_decision.reasoning}")
+        lines.append("")
+
+    for source_result in retrieval.source_results:
+        lines.append(f"### Source: {source_result.source_name}")
+        source_summaries = compressed_summaries.get(source_result.source_name, [])
+        for batch_index, summary in enumerate(source_summaries, start=1):
+            prefix = f"Batch {batch_index}: " if len(source_summaries) > 1 else ""
+            lines.append(f"- {prefix}{summary}")
+        if not source_summaries:
+            lines.append("- No summary available.")
+        lines.append("")
+
+    lines.extend(
+        [
+            "Answer requirements:",
+            "- Synthesize across all relevant sources.",
+            "- Use inline citations in the form [Source: source_name].",
+            "- Highlight conflicts or stale data when sources disagree.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _invoke_retriever(retriever: RetrieverLike | Any, query: str) -> list[Document]:
@@ -562,6 +763,8 @@ def _run_model_request(
     temperature: float,
     max_tokens: int | None,
     proxy_port: int | None,
+    auto_truncate_prompt: bool = True,
+    tools: list[dict[str, Any]] | None = None,
 ) -> ModelResponse:
     from .request import ModelRequest, RequestPayload
 
@@ -572,6 +775,8 @@ def _run_model_request(
             temperature=temperature,
             max_tokens=max_tokens,
             proxy_port=proxy_port,
+            auto_truncate_prompt=auto_truncate_prompt,
+            tools=tools,
         )
     )
 

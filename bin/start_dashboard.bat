@@ -3,7 +3,7 @@ setlocal
 
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_DIR=%%~fI"
-set "FIN_APP_PATH=%PROJECT_DIR%\dashboard\financial_analyst_app.py"
+set "FIN_APP_PATH=%PROJECT_DIR%\dashboard\financial_analyst_dashboard.py"
 set "LITELLM_APP_PATH=%PROJECT_DIR%\dashboard\litellm_app.py"
 set "VECTOR_DB_PATH_DEFAULT=%PROJECT_DIR%\vector_db"
 set "PYTHON_CMD="

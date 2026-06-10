@@ -38,6 +38,28 @@
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": false
+        },
+        {
+            "name": "Web Page Download",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${command:python.interpreterPath}",
+            "program": "${workspaceFolder}/scripts/web_page_download.py",
+            "args": [
+                "${input:webPageDownloadUrl}",
+                "--selector",
+                "a[href]",
+                "--pattern",
+                "\\.(html|pdf|csv)$",
+                "--same-domain",
+                "--output-dir",
+                "${input:webPageDownloadOutputDir}",
+                "--save-context",
+                "--context-only"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
         }
     ],
     "compounds": [
@@ -67,6 +89,18 @@
             "type": "promptString",
             "description": "LiteLLM dashboard Streamlit port",
             "default": "8502"
+        },
+        {
+            "id": "webPageDownloadUrl",
+            "type": "promptString",
+            "description": "Website URL to scrape",
+            "default": "https://www.google.com"
+        },
+        {
+            "id": "webPageDownloadOutputDir",
+            "type": "promptString",
+            "description": "Folder where downloaded files will be stored",
+            "default": "${workspaceFolder}/downloads/google"
         }
     ]
 

@@ -411,6 +411,9 @@ def get_github_embeddings(model_name: str, base_url: str | None = None) -> objec
         following the OpenAI-compatible REST API used by GitHub Models.
         """
 
+        # Token limit for text-embedding-3-small / text-embedding-3-large
+        _MODEL_TOKEN_LIMIT = 8192
+
         def __init__(self, model: str, endpoint: str, token: str):
             self.model = model
             self.endpoint = endpoint.rstrip("/")
@@ -422,14 +425,46 @@ def get_github_embeddings(model_name: str, base_url: str | None = None) -> objec
             if self.token:
                 self.headers["Authorization"] = f"Bearer {self.token}"
 
+        @staticmethod
+        def _truncate_text(text: str, max_tokens: int) -> str:
+            """Truncate *text* to at most *max_tokens* tokens using tiktoken.
+
+            Falls back to character-level truncation (~4 chars / token) if
+            tiktoken is unavailable.
+            """
+            try:
+                import tiktoken
+                enc = tiktoken.get_encoding("cl100k_base")
+                tokens = enc.encode(text)
+                if len(tokens) <= max_tokens:
+                    return text
+                return enc.decode(tokens[:max_tokens])
+            except Exception:
+                # Rough heuristic: ~4 characters per token
+                max_chars = max_tokens * 4
+                if len(text) <= max_chars:
+                    return text
+                return text[:max_chars]
+
         def _request(self, inputs: list[str]) -> list[list[float]]:
             url = f"{self.endpoint}/embeddings"
-            payload = {"model": self.model, "input": inputs}
+            # Truncate each input to stay within the model's token limit
+            truncated = [self._truncate_text(t, self._MODEL_TOKEN_LIMIT) for t in inputs]
+            payload = {"model": self.model, "input": truncated}
             try:
                 resp = requests.post(url, json=payload, headers=self.headers, timeout=30)
                 resp.raise_for_status()
             except RequestException as re:
-                raise RuntimeError(f"Failed to call GitHub embeddings endpoint {url}: {re}") from re
+                detail = ""
+                response = getattr(re, "response", None)
+                if response is not None:
+                    response_body = (response.text or "").strip()
+                    if response_body:
+                        detail = f" Response body: {response_body[:600]}"
+                raise RuntimeError(
+                    f"Failed to call GitHub embeddings endpoint {url}: {re}.{detail} "
+                    f"Ensure the selected model supports embeddings (for example: openai/text-embedding-3-small)."
+                ) from re
 
             data = resp.json()
 
@@ -458,7 +493,10 @@ def get_github_embeddings(model_name: str, base_url: str | None = None) -> objec
             return self._request(texts)
 
         def embed_query(self, text: str) -> list[float]:
-            return self._request([text])[0]
+            vectors = self._request([text])
+            if not vectors:
+                raise RuntimeError("GitHub embeddings endpoint returned no vectors for query input.")
+            return vectors[0]
 
         def __call__(self, text: str) -> list[float]:
             return self.embed_query(text)
@@ -469,11 +507,11 @@ def get_github_embeddings(model_name: str, base_url: str | None = None) -> objec
 def get_embeddings(model_name: str, base_url: str, provider: str = "ollama") -> object:
     """
     Return embeddings instance based on provider selection.
-    provider: "ollama" or "github"
+    provider: "ollama", "github", or "deepseek"
     """
     if provider == "ollama":
         return get_ollama_embeddings(model_name, base_url)
-    elif provider == "github":
+    elif provider in ("github", "deepseek"):
         return get_github_embeddings(model_name, base_url=base_url)
     else:
         raise ValueError(f"Unknown provider: {provider}")

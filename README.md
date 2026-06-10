@@ -32,6 +32,23 @@ Ollama models through LiteLLM, with a single interface for provider switching.
 Exploration of end-to-end RAG workflows for financial documents: indexing,
 embeddings selection, vector retrieval, and question-answer analysis.
 
+### Research Analysis Dashboard
+
+Query indexed financial documents (PDFs, text files) and get LLM-grounded answers
+with source citations. The dashboard also connects to live Yahoo Finance data via
+external tools — the LLM framework understands how to fetch and incorporate
+real-time market data into its answers.
+
+![Research Analysis — query with external tools](docs/images/query_with_tools.png)
+
+*Query panel with external tool connectivity — ask questions about indexed documents
+and retrieve live financial data simultaneously.*
+
+![Research Paper Analysis — full document Q&A](docs/images/research_paper.png)
+
+*Full document Q&A interface for research papers — upload, index, and query financial
+reports with source-cited answers.*
+
 ## How it works
 
 Simple flow (high-level):
@@ -66,6 +83,8 @@ How they differ in approach:
 	into a single ranked set; `routed` returns evidence from routed sources only.
 - Typical tradeoff: `separate` gives transparency, `ensemble` gives strongest aggregate relevance,
 	and `routed` gives efficiency and focus.
+
+
 
 ## Configuration examples
 

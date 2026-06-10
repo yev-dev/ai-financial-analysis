@@ -285,3 +285,55 @@ class TestEndToEndPrompting:
         assert len(result.source_prompts) == 2
         assert result.retrieval.routing_decision is not None
         assert result.retrieval.routing_decision.planner_used is True
+
+    @pytest.mark.unit
+    def test_query_with_multi_source_prompting_summarizes_oversized_prompt(self, monkeypatch):
+        calls: list[dict[str, str]] = []
+        large_sources = [
+            SourceRetrieverConfig(
+                name="large_source",
+                retriever=FakeRetriever(
+                    [
+                        Document(
+                            page_content=("Revenue expanded materially across segments. " * 35),
+                            metadata={"source": "large.txt", "filename": "large.txt", "chunk_index": index},
+                        )
+                        for index in range(4)
+                    ]
+                ),
+                description="Large synthetic source",
+            )
+        ]
+
+        class FakeResponse:
+            def __init__(self, content: str) -> None:
+                self.content = content
+
+        def fake_run_model_request(**kwargs):
+            calls.append(
+                {
+                    "system_prompt": kwargs["system_prompt"],
+                    "prompt": kwargs["prompt"],
+                }
+            )
+            if kwargs["system_prompt"].startswith("You compress retrieved financial evidence"):
+                return FakeResponse("- Revenue expanded across segments.\n- Margin commentary remained positive.")
+            return FakeResponse("compressed final answer")
+
+        monkeypatch.setattr("src.fin_ai.core.query._run_model_request", fake_run_model_request)
+        monkeypatch.setattr("src.fin_ai.core.query.resolve_model_name", lambda provider: "gpt-4.1-mini")
+        monkeypatch.setattr("src.fin_ai.core.query.get_model_safe_input_budget", lambda model: 600)
+
+        result = query_with_multi_source_prompting(
+            "Summarize the financial performance.",
+            large_sources,
+            provider="github",
+            mode="ensemble",
+        )
+
+        assert result.response.content == "compressed final answer"
+        assert len(calls) >= 2
+        assert calls[0]["system_prompt"].startswith("You compress retrieved financial evidence")
+        assert calls[-1]["prompt"] == result.prompt
+        assert "Compressed Source Summaries:" in result.prompt
+        assert "Retrieved Context:" not in result.prompt
