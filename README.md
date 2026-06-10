@@ -2,7 +2,7 @@
 
 Streamlit  Dashboard app for question-and-answer over financial documents, designed as a lightweight
 research playground for experimenting with local and remote LLMs, retrieval-augmented
-generation (RAG), and FAISS-based vector search.
+generation (RAG), FAISS-based vector search, Agentic Framework for Thematic Investments strategies creation, backtesting and research publication creation.
 
 This repository is also a collection of practical explorations across AI model approaches,
 tools, and libraries. A key focus is cost-effective development: running models locally with
@@ -19,6 +19,8 @@ chunks for a question, then passes that context to the LLM to generate a grounde
 Embeddings are numeric vector representations of text that capture semantic meaning, so
 similar questions and passages are close in vector space. We store and search those vectors
 with FAISS (Facebook AI Similarity Search), which powers fast nearest-neighbor retrieval.
+
+![Research Paper Analysis — full document Q&A](docs/images/architecture.png)
 
 ## Projects
 
