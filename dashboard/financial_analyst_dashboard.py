@@ -47,7 +47,6 @@ from dashboard import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDINGS_PROVIDER,
     OLLAMA_BASE_URL,
-    QUESTION_HISTORY_DIR,
     VECTOR_DB_DIR,
 )
 from dashboard.utils import (
@@ -58,9 +57,8 @@ from dashboard.utils import (
     render_csv_thumbnail,
     sanitize_generated_python_code,
 )
-from fin_ai.core.dashboard_engine import (
+from fin_ai.core.fin_ai_engine import (
     SUPPORTED_UPLOAD_TYPES,
-    SUPPORTED_SOURCE_SUFFIXES,
     answer_question,
     build_query_source_configs,
     clear_history,
@@ -79,6 +77,19 @@ from fin_ai.core.dashboard_engine import (
 from fin_ai.core.providers import list_models
 from fin_ai.core.query import format_source_citations
 from fin_ai.core.rag import load_embedding_metadata
+
+# ---------------------------------------------------------------------------
+# Agent framework imports
+# ---------------------------------------------------------------------------
+from fin_ai.agents import (
+    SingleAssistantRAG,
+    SingleAssistant,
+    init_engine,
+    publish_research_report,
+    library as agent_library,
+)
+from fin_ai.agents.workflow import register_tools
+from autogen import register_function
 
 st.set_page_config(page_title="Financial Data Analysis", layout="wide")
 SIDEBAR_PREVIEW_WIDTH = 320
@@ -316,7 +327,7 @@ if not is_upload_mode:
 
     if use_tools:
         with st.sidebar.expander("Available tools", expanded=False):
-            from fin_ai.agents.tools import YAHOO_FINANCE_TOOLS
+            from fin_ai.core.tools import YAHOO_FINANCE_TOOLS
             for tool in YAHOO_FINANCE_TOOLS:
                 if tool.get("type") == "function":
                     fn = tool["function"]
@@ -328,9 +339,89 @@ if not is_upload_mode:
     st.sidebar.divider()
 
 # ---------------------------------------------------------------------------
+# -- Agents ----------------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+# Agent Smith icon from The Matrix (base64-encoded small SVG glyph)
+_AGENT_SMITH_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" '
+    'fill="none" stroke="#00ff41" stroke-width="1.8" stroke-linecap="round" '
+    'stroke-linejoin="round">'
+    # Sunglasses shape
+    '<path d="M2 10l2 2 4-2 4 2 4-2 4 2 2-2"/>'
+    # Lenses
+    '<ellipse cx="6" cy="11" rx="2.5" ry="1.5" />'
+    '<ellipse cx="18" cy="11" rx="2.5" ry="1.5" />'
+    # Bridge
+    '<line x1="8.5" y1="11" x2="15.5" y2="11"/>'
+    # Temples
+    '<path d="M2 10c0-2 1-4 2-5"/>'
+    '<path d="M22 10c0-2-1-4-2-5"/>'
+    # Earpieces
+    '<circle cx="4" cy="5" r="1.2"/>'
+    '<circle cx="20" cy="5" r="1.2"/>'
+    '</svg>'
+)
+_AGENT_SMITH_HTML = f'<span style="vertical-align: middle;">{_AGENT_SMITH_SVG}</span>'
+
+st.sidebar.markdown(
+    f"### {_AGENT_SMITH_HTML} Agents",
+    unsafe_allow_html=True,
+)
+st.sidebar.caption(
+    "Run agentic workflows against your vector stores. Select an agent profile, "
+    "enter a task prompt, and the agent will use its registered tools to analyse, "
+    "research, and optionally publish a report."
+)
+
+agent_names = [n for n in agent_library]
+selected_agent = st.sidebar.selectbox(
+    "Select Agent Profile",
+    agent_names,
+    index=0,
+    key="agent_profile",
+)
+
+agent_rag_query = st.sidebar.text_area(
+    "Agent Task Prompt",
+    placeholder='e.g. "Analyse NVDA financials and competitive position"',
+    key="agent_prompt",
+    height=80,
+)
+
+agent_run_col, agent_clear_col = st.sidebar.columns(2)
+with agent_run_col:
+    agent_submit = st.button("▶️ Run Agent", key="run_agent", use_container_width=True)
+with agent_clear_col:
+    if st.button("Clear Output", key="clear_agent", use_container_width=True):
+        st.session_state.pop("agent_response", None)
+        st.session_state.pop("agent_publication", None)
+        st.rerun()
+
+agent_email = st.sidebar.text_input(
+    "Email report (optional)",
+    placeholder="analyst@firm.com",
+    key="agent_email",
+)
+
+agent_format = st.sidebar.selectbox(
+    "Report format",
+    ["html", "pdf"],
+    index=0,
+    key="agent_format",
+)
+
+# Show the embedding model that agents will use (set below in Embedding section)
+st.sidebar.caption(
+    "Agents use the embedding model configured in the 📐 Embedding section below "
+    "when querying local vector stores."
+)
+
+st.sidebar.divider()
+
+# ---------------------------------------------------------------------------
 # -- Embedding -----------------------------------------------------------
 # ---------------------------------------------------------------------------
-st.sidebar.subheader("📐 Embedding")
 st.sidebar.caption(
     "Configure the model that converts your documents into vector "
     "representations. Embeddings are used both when indexing new documents "
@@ -587,4 +678,145 @@ if submit_clicked and question and selected_vector_db != "Upload New Document":
         st.session_state["question_history"] = load_history(selected_vector_db)
 
 
+# ---------------------------------------------------------------------------
+# -- Agent execution & display ---------------------------------------------
+# ---------------------------------------------------------------------------
 
+# Helper to build an LLM config from the current sidebar provider/model selections
+def _build_agent_llm_config() -> dict:
+    """Build an autogen-compatible llm_config from the current sidebar selections."""
+    if selected_provider == "ollama":
+        return {
+            "config_list": [
+                {
+                    "model": selected_model,
+                    "base_url": OLLAMA_BASE_URL,
+                    "api_key": "ollama",
+                }
+            ],
+            "temperature": 0,
+            "timeout": 120,
+        }
+    elif selected_provider == "github":
+        return {
+            "config_list": [
+                {
+                    "model": selected_model,
+                    "base_url": github_endpoint,
+                    "api_key": github_token,
+                }
+            ],
+            "temperature": 0,
+            "timeout": 120,
+        }
+    else:  # deepseek
+        return {
+            "config_list": [
+                {
+                    "model": selected_model,
+                    "base_url": deepseek_base_url,
+                    "api_key": deepseek_token if selected_provider == "deepseek" else "",
+                }
+            ],
+            "temperature": 0,
+            "timeout": 120,
+        }
+
+
+if agent_submit and agent_rag_query.strip():
+    # Initialise the engine bridge so local RAG context is available
+    with st.spinner(f"🤖 Running {selected_agent} agent..."):
+        # Initialise engine bridge (picks up defaults from dashboard env)
+        engine_status = init_engine(
+            chat_provider=selected_provider,
+            embedding_model=selected_embedding_model,
+            embedding_provider=selected_emb_provider,
+            embedding_base_url=embeddings_base_url,
+        )
+        agent_llm_config = _build_agent_llm_config()
+
+        _is_publisher = selected_agent == "Research_Publisher"
+
+        if _is_publisher:
+            # Research_Publisher: SingleAssistant (no RAG retrieve_config needed)
+            agent = SingleAssistant(
+                selected_agent,
+                llm_config=agent_llm_config,
+                human_input_mode="NEVER",
+                max_consecutive_auto_reply=8,
+                code_execution_config=False,
+            )
+        else:
+            # Other agents: SingleAssistantRAG with local RAG config
+            agent = SingleAssistantRAG(
+                selected_agent,
+                llm_config=agent_llm_config,
+                human_input_mode="NEVER",
+                max_consecutive_auto_reply=8,
+                code_execution_config=False,
+                retrieve_config={
+                    "task": "qa",
+                    "vector_db": None,
+                    "docs_path": [],
+                    "chunk_token_size": 1000,
+                    "get_or_create": False,
+                    "collection_name": "dashboard_agent_rag",
+                    "must_break_at_empty_line": False,
+                    "customized_prompt": (
+                        "Context from local stores:\n{input_context}\n\n"
+                        "Query: {input_question}"
+                    ),
+                },
+                rag_description="Query local FAISS vector stores for financial context.",
+            )
+
+        # If the prompt mentions email/publish and Research_Publisher, append publishing instruction
+        prompt = agent_rag_query.strip()
+        email_to = agent_email.strip()
+        if _is_publisher and email_to:
+            prompt += (
+                f"\n\nAfter completing your analysis, publish the report as {agent_format} "
+                f"and email it to {email_to}."
+            )
+        elif _is_publisher:
+            prompt += (
+                f"\n\nAfter completing your analysis, publish the report as {agent_format}."
+            )
+
+        try:
+            agent.chat(prompt)
+            # Extract the last message
+            history = agent.user_proxy.chat_messages
+            last_content = ""
+            if history:
+                last_agent = list(history.keys())[-1]
+                msgs = history[last_agent]
+                if msgs:
+                    last_content = msgs[-1].get("content", "")
+            st.session_state["agent_response"] = last_content
+
+            # Also try to publish if Research_Publisher and the agent didn't already
+            if _is_publisher:
+                pub_result = publish_research_report(
+                    content=last_content or agent_rag_query,
+                    title=f"{selected_agent} Report",
+                    format=agent_format,
+                    email=email_to,
+                )
+                st.session_state["agent_publication"] = pub_result
+
+        except Exception as exc:
+            st.session_state["agent_response"] = f"❌ Agent error: {exc}"
+
+
+# Display agent output
+agent_response = st.session_state.get("agent_response")
+if agent_response:
+    st.subheader(f"🤖 {selected_agent} Response")
+    with st.container():
+        render_response_output(agent_response, "Markdown", panel_key="agent_response")
+
+agent_publication = st.session_state.get("agent_publication")
+if agent_publication:
+    st.subheader("📄 Publication Result")
+    st.code(agent_publication, language="json")

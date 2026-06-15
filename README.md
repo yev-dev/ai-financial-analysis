@@ -1,17 +1,13 @@
 # AI Financial Analysis
 
-Streamlit  Dashboard app for question-and-answer over financial documents, designed as a lightweight
-research playground for experimenting with local and remote LLMs, retrieval-augmented
-generation (RAG), FAISS-based vector search, Agentic Framework for Thematic Investments strategies creation, backtesting and research publication creation.
+Streamlit dashboard for question-and-answer over financial documents, powered by
+retrieval-augmented generation (RAG), FAISS vector search, and an **agentic framework**
+for multi-agent research workflows, thematic investment analysis, and report publishing.
 
-This repository is also a collection of practical explorations across AI model approaches,
-tools, and libraries. A key focus is cost-effective development: running models locally with
-the Ollama suite when possible, and using GitHub Copilot and GitHub Models as an affordable
-hosted option when local execution is not the best fit.
-
-This repository provides a Streamlit UI to upload or point to PDFs and text documents,
-index them with embeddings, and run semantic search + LLM-based answers with source
-citation and optional PDF page previews.
+This repository is a practical exploration of AI-enabled financial analysis — running
+models locally with **Ollama**, using **GitHub Models / Copilot** as a cost-effective
+hosted option, and orchestrating agents that can analyse, cross-reference, and publish
+research autonomously.
 
 Architecture note: this project is built around a RAG + embeddings pipeline.
 RAG (Retrieval-Augmented Generation) means the app first retrieves relevant document
@@ -20,318 +16,291 @@ Embeddings are numeric vector representations of text that capture semantic mean
 similar questions and passages are close in vector space. We store and search those vectors
 with FAISS (Facebook AI Similarity Search), which powers fast nearest-neighbor retrieval.
 
-![Research Paper Analysis — full document Q&A](docs/images/architecture.png)
+![System Architecture](docs/images/architecture.png)
 
-## Projects
+---
 
-1. LiteLLM Dashboard
+## Agentic Framework
 
-Cost-effective way to run queries against GitHub Copilot/GitHub Models or local
-Ollama models through LiteLLM, with a single interface for provider switching.
+The `src/fin_ai/agents/` package provides a multi-agent orchestration framework built
+on Microsoft **AutoGen**.  Agents are configurable, tool-aware, and can communicate
+with each other and with the local RAG infrastructure.
 
-2. Financial Analysis of Research Paper
+![System Architecture](docs/images/agents.png)
 
-Exploration of end-to-end RAG workflows for financial documents: indexing,
-embeddings selection, vector retrieval, and question-answer analysis.
+### Agent Library
 
-### Research Analysis Dashboard
+| Agent | Role | Key Tools |
+|-------|------|-----------|
+| **Data_Analyst** | Quantitative analysis of financial statements | `get_income_stmt`, `get_balance_sheet`, `get_cash_flow`, `get_financial_snapshot`, RAG query |
+| **Market_Analyst** | Market data, sentiment, analyst consensus | `get_stock_data`, `get_analyst_recommendations`, `get_stock_info`, RAG query |
+| **Research_Analyst** | Deep-dive company research (full toolkit) | All YFinance tools + RAG + citations |
+| **Thematic_Investor** | Theme-based evaluation (AI, energy transition) | Financials + RAG + thematic scoring |
+| **Research_Publisher** | Format, publish, and distribute research | `publish_research_html`, `publish_research_pdf`, `send_research_email` |
 
-Query indexed financial documents (PDFs, text files) and get LLM-grounded answers
-with source citations. The dashboard also connects to live Yahoo Finance data via
-external tools — the LLM framework understands how to fetch and incorporate
-real-time market data into its answers.
+### How agents work
 
-![Research Analysis — query with external tools](docs/images/query_with_tools.png)
+```
+User prompt → FinRobot / SingleAssistantRAG
+                  │
+                  ▼
+          Tool Resolution Layer
+     (fin_ai.core.tools + engine_bridge)
+      ┌──────────────────────────────┐
+      │  • get_stock_info            │
+      │  • get_income_stmt           │
+      │  • query_local_rag           │
+      │  • publish_research_report   │
+      │  • list_available_models     │
+      │  • ...                       │
+      └──────────────┬───────────────┘
+                     ▼
+             LLM reasoning
+                     │
+                     ▼
+           Answer + optional publish
+```
 
-*Query panel with external tool connectivity — ask questions about indexed documents
-and retrieve live financial data simultaneously.*
+Each agent automatically discovers and registers its tools from `fin_ai.core.tools`
+(YFinance data functions) and `fin_ai.agents.engine_bridge` (local RAG, model listing,
+publishing).  Tool registration is string-based — agents declare tool names in their
+profile and `FinRobot.register_proxy()` resolves them via `register_tools()`.
 
-![Research Paper Analysis — full document Q&A](docs/images/research_paper.png)
+### Agent Pipeline & Scheduler
 
-*Full document Q&A interface for research papers — upload, index, and query financial
-reports with source-cited answers.*
+For multi-step, multi-agent workflows with dependency resolution:
+
+```python
+from fin_ai.agents.scheduler import AgentTask, AgentPipeline, AgentScheduler
+
+pipeline = AgentPipeline("Weekly Review", llm_config=llm_config)
+pipeline.add_task(AgentTask("analyze_aapl", prompt="Analyse AAPL",
+                            agent_config="Data_Analyst"))
+pipeline.add_task(AgentTask("synthesize", prompt="Compare results",
+                            agent_config="Financial_Analyst",
+                            depends_on=["analyze_aapl"]))
+pipeline.run()
+
+# Or schedule recurring execution:
+scheduler = AgentScheduler([pipeline], interval_seconds=86400)
+scheduler.start()
+```
+
+See `src/fin_ai/agents/scheduler.py`.
+
+---
+
+## Dashboard Interaction
+
+The Streamlit dashboard (`financial_analyst_dashboard.py`) integrates the agentic
+framework directly in the sidebar alongside the standard RAG query interface:
+
+```
+┌──────────────────────────────────────────────────┐
+│  Sidebar                                          │
+│  ┌──────────────────────────────────────────────┐ │
+│  │  Reasoning (LLM provider + model)          │ │
+│  ├──────────────────────────────────────────────┤ │
+│  │ 🕶 Agents                                   │ │
+│  │  • Select agent profile (dropdown)           │ │
+│  │  • Enter task prompt (text area)             │ │
+│  │  • Optional: email + HTML/PDF format         │ │
+│  │  • [▶ Run Agent]  [Clear Output]             │ │
+│  ├──────────────────────────────────────────────┤ │
+│  │ 📐 Embedding (model selection)               │ │
+│  └──────────────────────────────────────────────┘ │
+│                                                    │
+│  Main panel                                        │
+│  ┌──────────────────────────────────────────────┐ │
+│  │ 🤖 Agent Response (Markdown with citations)  │ │
+│  │ 📄 Publication Result (JSON summary)          │ │
+│  └──────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────┘
+```
+
+**Workflow from the dashboard:**
+1. Upload documents via the existing upload section (PDF, CSV, JSON, HTML, DOCX)
+2. Select an **Agent Profile** from the sidebar dropdown
+3. Enter a task prompt — e.g. *"Analyse NVDA's competitive position using RAG"*
+4. Optionally enter an email address and choose HTML or PDF format
+5. Click **Run Agent**
+6. The agent retrieves relevant context from local FAISS stores, queries live YFinance
+   data if needed, and produces a structured answer
+7. If `Research_Publisher` is selected, the report is saved to `published_research/`
+   and emailed to the provided address
+8. Both the agent response and publication result are displayed in the main panel
+
+---
+
+## Architecture
+
+```
+                     ┌──────────────────────────┐
+                     │   Streamlit Dashboard     │
+                     │  (financial_analyst_      │
+                     │   dashboard.py)           │
+                     └──────┬──────────┬─────────┘
+                            │          │
+                    ┌───────┘          └───────┐
+                    ▼                          ▼
+        ┌────────────────────┐   ┌──────────────────────────┐
+        │  RAG Engine         │   │  Agentic Framework       │
+        │  (fin_ai_engine)   │   │  (fin_ai/agents/)        │
+        │                    │   │                          │
+        │  ┌──────────────┐  │   │  ┌────────────────────┐  │
+        │  │ FAISS Vector │  │   │  │ FinRobot           │  │
+        │  │ Stores       │  │   │  │ SingleAssistant    │  │
+        │  └──────────────┘  │   │  │ SingleAssistantRAG │  │
+        │                    │   │  │ AgentPipeline      │  │
+        │  ┌──────────────┐  │   │  │ AgentScheduler     │  │
+        │  │ answer_      │  │   │  │ Research_Publisher │  │
+        │  │ question()   │  │   │  └────────────────────┘  │
+        │  └──────────────┘  │   └──────────────────────────┘
+        └────────────────────┘
+                    │                          │
+                    └──────────┬───────────────┘
+                               ▼
+            ┌──────────────────────────────────────┐
+            │  Tool Resolution Layer                │
+            │  (fin_ai.core.tools + engine_bridge)  │
+            │                                      │
+            │  YFinance tools          RAG tools   │
+            │  ┌──────────────────┐   ┌─────────┐  │
+            │  │ get_stock_info   │   │query_   │  │
+            │  │ get_income_stmt  │   │local_rag│  │
+            │  │ get_balance_sheet│   │list_    │  │
+            │  │ get_cash_flow    │   │vector_  │  │
+            │  │ get_stock_data   │   │stores   │  │
+            │  │ get_analyst_recs │   └─────────┘  │
+            │  └──────────────────┘                │
+            │                                      │
+            │  Publishing tools                    │
+            │  ┌────────────────────────────────┐  │
+            │  │ publish_research_html          │  │
+            │  │ publish_research_pdf           │  │
+            │  │ publish_research_report        │  │
+            │  │ send_research_email            │  │
+            │  └────────────────────────────────┘  │
+            └──────────────────────────────────────┘
+```
+
+---
+
+## Research Publishing
+
+The `Research_Publisher` agent and the underlying tools in `fin_ai.core.tools` produce
+professional reports:
+
+- **HTML reports** — Jinja2-templated with professional CSS, Markdown-to-HTML conversion,
+  auto-generated metadata, and disclaimer footer
+- **PDF reports** — via weasyprint (true PDF) or fallback to print-ready HTML
+- **Email distribution** — SMTP-based with HTML body + file attachment
+- Output directory: `published_research/`
+
+### SMTP Configuration
+
+```bash
+export FINAI_SMTP_HOST=smtp.gmail.com
+export FINAI_SMTP_PORT=587
+export FINAI_SMTP_USER=your@email.com
+export FINAI_SMTP_PASSWORD=your-app-password
+```
+
+---
 
 ## How it works
 
-Simple flow (high-level):
+Two paths for answering questions:
 
-User documents (PDF / text) -> chunker/cleaner -> embeddings (Ollama or remote) -> FAISS index
--> retriever -> LLM (Ollama or remote) -> Answer + citations / page snippets
+```
+Path A — Direct RAG (no agent):
+  User query → retrieve from FAISS → LLM → Answer + citations
 
-ASCII diagram:
-
-	[User] -> [Streamlit UI] -> [Chunker & Indexer] -> [Embeddings Provider]
-																				 -> [FAISS index]
-	[Query] -> [Retriever] -> [LLM] -> [Answer + Sources]
+Path B — Agentic (with agent):
+  User prompt → Agent (tool-equipped LLM) → RAG + YFinance + reasoning
+    → Answer → [optional: publish_research_report → email]
+```
 
 ### Retrieval modes
 
-The app supports three retrieval modes for multi-source question answering:
+- `separate` — query each source independently, keep results grouped
+- `ensemble` — merge and re-rank results using weighted fusion (best overall evidence)
+- `routed` — select a subset of likely-relevant sources first (faster, focused)
 
-- `separate`: Queries each selected source independently and keeps results grouped by source.
-	This is useful when you want source-by-source visibility and explicit cross-source comparison.
-- `ensemble`: Queries selected sources, then merges and re-ranks results into one combined context
-	using weighted fusion. This is useful when you want the strongest overall evidence regardless of
-	which source it came from.
-- `routed`: First chooses a smaller subset of likely relevant sources (heuristic routing or optional
-	LLM planner), then retrieves from only those sources. This is useful for faster, more focused
-	retrieval on broad source sets.
+---
 
-How they differ in approach:
+## Project structure
 
-- Scope of retrieval: `separate` and `ensemble` use all selected sources, while `routed` narrows
-	to a subset before retrieval.
-- Evidence organization: `separate` preserves per-source structure; `ensemble` blends evidence
-	into a single ranked set; `routed` returns evidence from routed sources only.
-- Typical tradeoff: `separate` gives transparency, `ensemble` gives strongest aggregate relevance,
-	and `routed` gives efficiency and focus.
-
-
-
-## Configuration examples
-
-Switching providers is done by selecting which embeddings/LLM endpoint to use. Example
-configuration (YAML):
-
-```yaml
-# Use either 'ollama' or 'remote' here
-model_provider: ollama
-
-ollama:
-	# Ollama server base URL (default local)
-	url: "http://localhost:11434"
-	chat_model: "llama2-chat"        # model name used for chat/generation
-	embedding_model: "llama2-embedding"  # model name used for embeddings
-
-github:
-	# Example GitHub-hosted model configuration. Replace values with the
-	# model repo/identifier and the environment variable holding your GitHub token.
-	# This assumes you are using a GitHub Models / Inference endpoint or a
-	# self-hosted inference gateway that accepts a repo identifier.
-	repo: "owner/model-name"           # e.g. 'my-org/finance-qa-model'
-	inference_url: "https://api.github.com/models/{owner}/{model}/infer"
-	token_env: "GITHUB_TOKEN"         # store token in env var
-	model: "v1.0"                     # provider-specific model tag
-	embedding_model: "embed-v1"       # embedding model name if separate
+```
+src/
+├── fin_ai/
+│   ├── __init__.py
+│   ├── agents/
+│   │   ├── __init__.py           # Public exports
+│   │   ├── agent_library.py       # Agent profiles & tool assignments
+│   │   ├── agentic_rag.py         # AutoGen RAG function factory
+│   │   ├── engine_bridge.py       # RAG + model + publishing tools for agents
+│   │   ├── multi_company_rag.py   # Multi-ticker RAG engine
+│   │   ├── prompts.py             # System prompts for leader/role patterns
+│   │   ├── scheduler.py           # AgentTask, AgentPipeline, AgentScheduler
+│   │   ├── utils.py               # Order/trigger helpers
+│   │   └── workflow.py            # FinRobot, SingleAssistant, MultiAssistant
+│   └── core/
+│       ├── fin_ai_engine.py       # RAG query engine
+│       ├── providers.py           # Model listing (Ollama, GitHub, DeepSeek)
+│       ├── query.py               # Multi-source retrieval & routing
+│       ├── rag.py                 # FAISS indexing & document loading
+│       ├── request.py             # LiteLLM client + request pipeline
+│       ├── response.py            # Response metadata & formatting
+│       └── tools.py               # YFinance tools + publishing functions
+├── dashboard/
+│   ├── __init__.py                # Configuration & paths
+│   ├── utils.py                   # Embeddings, PDF/CSV rendering
+│   ├── financial_analyst_app.py   # Compatibility entry point
+│   └── financial_analyst_dashboard.py  # Streamlit UI
+├── published_research/            # Agent-generated reports
+└── vector_db/                     # FAISS indexes stored here
 ```
 
-To switch between Ollama (local) and a remote provider, set `model_provider` to
-`ollama` or `remote` and populate the corresponding section with connection details.
+---
 
+## Quick start
+
+```bash
+# 1. Create environment
+conda create -n fin_ai python=3.11 -y
+conda activate fin_ai
+
+# 2. Install dependencies
+pip-sync requirements.txt
+
+# 3. Run the dashboard
+streamlit run dashboard/financial_analyst_dashboard.py
+```
+
+Or use the provided scripts:
+
+```bash
+./start_dashboard.sh       # macOS/Linux
+start_dashboard.bat        # Windows
+```
 
 ## Prerequisites
 
 - Python 3.11 (recommended)
-- Conda (optional, if you prefer Conda environments)
-- Ollama installed and running (for chat and embedding models)
-- Optional system dependency for PDF previews:
-	- macOS: `brew install poppler`
-	- Ubuntu/Debian: `sudo apt-get install poppler-utils`
+- Ollama installed and running (for local chat + embedding models)
+- Optional: `poppler` for PDF previews (`brew install poppler` on macOS)
 
-## Install dependencies with pip-tools
-
-This project uses:
-
-- `requirements.in` for top-level dependencies
-- `requirements.txt` for fully resolved, pinned dependencies generated by `pip-compile`
-
-### 1. Create and activate an environment
-
-Option A: `.venv`
-
-macOS/Linux:
+## Dependency management
 
 ```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-```
-
-Windows (PowerShell):
-
-```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-
-Option B: Conda environment
-
-macOS/Linux/Windows:
-
-```bash
-conda create -n fin_ai python=3.11 -y
-conda activate fin_ai
-```
-
-### 2. Install pip-tools
-
-```bash
-python -m pip install --upgrade pip pip-tools
-```
-
-### 3. Resolve dependencies with pip-compile
-
-```bash
-pip-compile requirements.in -o requirements.txt
-```
-
-Notes:
-
-- This step resolves transitive dependencies and pins exact versions.
-- Commit both `requirements.in` and `requirements.txt` after changes.
-
-### 4. Sync your environment to the lock file
-
-```bash
-pip-sync requirements.txt
-```
-
-`pip-sync` installs missing packages and removes extras so your environment exactly matches `requirements.txt`.
-
-## Run the app
-
-From this folder:
-
-macOS/Linux:
-
-```bash
-./start_dashboard.sh
-```
-
-Windows:
-
-```bat
-start_dashboard.bat
-```
-
-Alternative:
-
-```bash
-python -m streamlit run app.py
-```
-
-If you used Conda, make sure the environment is active before running:
-
-```bash
-conda activate ai_financial_analysis
-python -m streamlit run app.py
-```
-
-## Updating dependencies
-
-1. Edit `requirements.in`.
-2. Re-resolve and pin:
-
-```bash
-pip-compile requirements.in -o requirements.txt
-```
-
-3. Apply the updated lock file:
-
-```bash
-pip-sync requirements.txt
-```
-
-### Upgrade all packages
-
-```bash
-pip-compile --upgrade requirements.in -o requirements.txt
-pip-sync requirements.txt
-```
-
-### Upgrade one package
-
-```bash
-pip-compile --upgrade-package langchain requirements.in -o requirements.txt
-pip-sync requirements.txt
-```
-
-## Windows Guide
-
-Use this section if you are running the project on Windows.
-
-### Prerequisites (Windows)
-
-- Python 3.11
-- Conda (optional, if you prefer Conda environments)
-- Ollama installed and running
-- Optional for PDF page rendering: Poppler
-
-Install Poppler with Chocolatey:
-
-```powershell
-choco install poppler
-```
-
-### PowerShell setup
-
-```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip pip-tools
+# Update top-level dependencies in requirements.in, then:
 pip-compile requirements.in -o requirements.txt
 pip-sync requirements.txt
 ```
 
-### PowerShell setup (Conda)
+## Related
 
-```powershell
-conda create -n ai_financial_analysis python=3.11 -y
-conda activate ai_financial_analysis
-python -m pip install --upgrade pip pip-tools
-pip-compile requirements.in -o requirements.txt
-pip-sync requirements.txt
-```
-
-If activation is blocked, run once in an elevated PowerShell:
-
-```powershell
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-### CMD setup
-
-```bat
-py -3.11 -m venv .venv
-.venv\Scripts\activate.bat
-python -m pip install --upgrade pip pip-tools
-pip-compile requirements.in -o requirements.txt
-pip-sync requirements.txt
- pip install watchdog
-```
-
-### CMD setup (Conda)
-
-```bat
-conda create -n ai_fin python=3.11 -y
-conda activate ai_fin
-python -m pip install --upgrade pip pip-tools
-pip-compile requirements.in -o requirements.txt
-pip-sync requirements.txt
-```
-
-### Run on Windows
-
-```bat
-start_dashboard.bat
-```
-
-Or directly:
-
-```powershell
-python -m streamlit run app.py
-```
-
-Or with Conda activated: 
-
-```powershell
-conda activate ai_fin
-python -m streamlit run app.py
-```
-
-### Sample Research Papers
-
-[Sample Research](<https://mergersandinquisitions.com/equity-research-report/#:~:text=You%20can%20get%20the%20reports,here)%20has%20the%20following%20components:>)
-
-### References
-
-[Finding the Best Open-Source Embedding Model for RAG](https://www.tigerdata.com/blog/finding-the-best-open-source-embedding-model-for-rag)
+- [AutoGen](https://github.com/microsoft/autogen) — Multi-agent conversation framework
+  from Microsoft Research
+- [FAISS](https://github.com/facebookresearch/faiss) — Facebook AI Similarity Search

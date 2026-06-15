@@ -1,6 +1,6 @@
-agent-framework-core==1.0.0b260212
-agent-framework-devui==1.0.0b260212
-agent-framework-orchestrations==1.0.0b260212
+# agent-framework-core==1.0.0b260212
+# agent-framework-devui==1.0.0b260212
+# agent-framework-orchestrations==1.0.0b260212
 # docling
 faiss-cpu
 px
@@ -12,6 +12,9 @@ langchain-core
 langchain-ollama
 langchain-litellm
 langchain-text-splitters
+# Agentic Framework
+autogen
+langchain
 pdf2image
 Pillow
 pymupdf

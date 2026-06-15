@@ -1,0 +1,107 @@
+"""
+RAG function factory for autogen RetrieveUserProxyAgent integration.
+
+Creates a ``RetrieveUserProxyAgent`` and a ``retrieve_content`` callable
+that can be registered as a tool for autogen agents.  This uses autogen's
+built-in retrieval (file-based, chunked).
+
+For local FAISS vector store queries, see ``fin_ai.agents.engine_bridge.query_local_rag``
+which wraps ``fin_ai.core.fin_ai_engine.answer_question``.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from autogen.agentchat.contrib.retrieve_user_proxy_agent import RetrieveUserProxyAgent
+
+
+PROMPT_RAG_FUNC = """Below is the context retrieved from the required file based on your query.
+If you can't answer the question with or without the current context, you should try using a more refined search query according to your requirements, or ask for more contexts.
+
+Your current query is: {input_question}
+
+Retrieved context is: {input_context}
+"""
+
+
+def get_rag_function(
+    retrieve_config: dict,
+    description: str = "",
+):
+    """Create a RAG retrieval function and its underlying RetrieveUserProxyAgent.
+
+    Parameters
+    ----------
+    retrieve_config : dict
+        Configuration dict for ``RetrieveUserProxyAgent``.  Must contain at least
+        ``"task"`` (e.g. ``"qa"``), ``"docs_path"``, ``"chunk_token_size"``, etc.
+    description : str
+        Custom docstring for the generated ``retrieve_content`` function.
+        If empty, a default description is built from the doc paths.
+
+    Returns
+    -------
+    tuple[Callable, RetrieveUserProxyAgent]
+        ``(retrieve_content_function, rag_assistant)``
+    """
+
+    def termination_msg(x):
+        return (
+            isinstance(x, dict)
+            and "TERMINATE" == str(x.get("content", ""))[-9:].upper()
+        )
+
+    if "customized_prompt" not in retrieve_config:
+        retrieve_config["customized_prompt"] = PROMPT_RAG_FUNC
+
+    rag_assistant = RetrieveUserProxyAgent(
+        name="RAG_Assistant",
+        is_termination_msg=termination_msg,
+        human_input_mode="NEVER",
+        default_auto_reply="Reply `TERMINATE` if the task is done.",
+        max_consecutive_auto_reply=3,
+        retrieve_config=retrieve_config,
+        code_execution_config=False,
+        description="Assistant who has extra content retrieval power for solving difficult problems.",
+    )
+
+    def retrieve_content(
+        message: Annotated[
+            str,
+            "Refined query message which keeps the original meaning and can be used to retrieve content for code generation or question answering from the provided files."
+            "For example, 'YoY comparisons of profit margin', 'risk factors of NVIDIA in Q4', 'retrieve historical stock price data using YFinance'",
+        ],
+        n_results: Annotated[int, "Number of results to retrieve, default to 3"] = 3,
+    ) -> str:
+        rag_assistant.n_results = n_results
+        update_context_case1, update_context_case2 = (
+            rag_assistant._check_update_context(message)
+        )
+        if (
+            update_context_case1 or update_context_case2
+        ) and rag_assistant.update_context:
+            rag_assistant.problem = (
+                message
+                if not hasattr(rag_assistant, "problem")
+                else rag_assistant.problem
+            )
+            _, ret_msg = rag_assistant._generate_retrieve_user_reply(message)
+        else:
+            _context = {"problem": message, "n_results": n_results}
+            ret_msg = rag_assistant.message_generator(rag_assistant, None, _context)
+        return ret_msg if ret_msg else message
+
+    if description:
+        retrieve_content.__doc__ = description
+    else:
+        retrieve_content.__doc__ = (
+            "retrieve content from documents to assist question answering "
+            "or code generation."
+        )
+        docs = retrieve_config.get("docs_path", [])
+        if docs:
+            docs_str = "\n".join(docs if isinstance(docs, list) else [docs])
+            retrieve_content.__doc__ += f" Available Documents:\n{docs_str}"
+
+    return retrieve_content, rag_assistant

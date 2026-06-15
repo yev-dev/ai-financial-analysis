@@ -7,7 +7,7 @@ import json
 import pandas as pd
 import pytest
 
-from src.fin_ai.agents import tools
+from fin_ai.core import tools
 
 
 class _FakeTicker:

@@ -9,7 +9,7 @@ from dashboard import DEFAULT_GITHUB_MODEL, DEFAULT_DEEPSEEK_MODEL, DEEPSEEK_BAS
 from fin_ai.core.providers import list_models
 from fin_ai.core.request import ModelRequest, RequestPayload
 from fin_ai.core.response import ResponseFactory, ResponseMetadata
-from fin_ai.agents.tools import YAHOO_FINANCE_TOOLS, LITELLM_TOOL_FUNCTIONS
+from fin_ai.core.tools import YAHOO_FINANCE_TOOLS, LITELLM_TOOL_FUNCTIONS
 
 
 st.set_page_config(page_title="LiteLLM Chat", layout="wide")
