@@ -197,13 +197,13 @@ professional reports:
 - **Email distribution** — SMTP-based with HTML body + file attachment
 - Output directory: `published_research/`
 
-### SMTP Configuration
+### SMTP Configuration (Gmail)
 
 ```bash
-export FINAI_SMTP_HOST=smtp.gmail.com
-export FINAI_SMTP_PORT=587
-export FINAI_SMTP_USER=your@email.com
-export FINAI_SMTP_PASSWORD=your-app-password
+export AI_RESEARCH_SMTP_HOST=smtp.gmail.com
+export AI_RESEARCH_SMTP_PORT=587
+export AI_RESEARCH_SMTP_USER=your@gmail.com
+export AI_RESEARCH_SMTP_PASSWORD=your-gmail-app-password
 ```
 
 ---

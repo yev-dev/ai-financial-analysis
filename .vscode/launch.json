@@ -14,7 +14,11 @@
                 "${input:financialDashboardPort}"
             ],
             "env": {
-                "VECTOR_DB_DIR": "${input:vectorDbPath}"
+                "VECTOR_DB_DIR": "${input:vectorDbPath}",
+                "AI_RESEARCH_SMTP_HOST": "${input:smtpHost}",
+                "AI_RESEARCH_SMTP_PORT": "${input:smtpPort}",
+                "AI_RESEARCH_SMTP_USER": "${input:smtpUser}",
+                "AI_RESEARCH_SMTP_PASSWORD": "${input:smtpPassword}"
             },
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
@@ -89,6 +93,30 @@
             "type": "promptString",
             "description": "LiteLLM dashboard Streamlit port",
             "default": "8502"
+        },
+        {
+            "id": "smtpHost",
+            "type": "promptString",
+            "description": "SMTP server host for emailing research reports",
+            "default": "smtp.gmail.com"
+        },
+        {
+            "id": "smtpPort",
+            "type": "promptString",
+            "description": "SMTP server port",
+            "default": "587"
+        },
+        {
+            "id": "smtpUser",
+            "type": "promptString",
+            "description": "SMTP username (Gmail address)",
+            "default": ""
+        },
+        {
+            "id": "smtpPassword",
+            "type": "promptString",
+            "description": "SMTP password or Gmail App Password",
+            "default": ""
         },
         {
             "id": "webPageDownloadUrl",

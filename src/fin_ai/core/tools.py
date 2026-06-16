@@ -328,8 +328,8 @@ def send_research_email(
     """Send research report via email with optional file attachment.
 
     SMTP credentials are read from environment variables by default:
-    ``FINAI_SMTP_HOST``, ``FINAI_SMTP_PORT``, ``FINAI_SMTP_USER``,
-    ``FINAI_SMTP_PASSWORD``.  Override by passing arguments directly.
+    ``AI_RESEARCH_SMTP_HOST``, ``AI_RESEARCH_SMTP_PORT``, ``AI_RESEARCH_SMTP_USER``,
+    ``AI_RESEARCH_SMTP_PASSWORD``.  Override by passing arguments directly.
 
     Parameters
     ----------
@@ -342,25 +342,25 @@ def send_research_email(
     attachment_path : str
         Optional path to a file to attach.
     smtp_host : str
-        SMTP server hostname.  Default: env ``FINAI_SMTP_HOST``.
+        SMTP server hostname.  Default: env ``AI_RESEARCH_SMTP_HOST``.
     smtp_port : int
-        SMTP port.  Default: env ``FINAI_SMTP_PORT`` or 587.
+        SMTP port.  Default: env ``AI_RESEARCH_SMTP_PORT`` or 587.
     smtp_user : str
-        SMTP username.  Default: env ``FINAI_SMTP_USER``.
+        SMTP username.  Default: env ``AI_RESEARCH_SMTP_USER``.
     smtp_password : str
-        SMTP password.  Default: env ``FINAI_SMTP_PASSWORD``.
+        SMTP password.  Default: env ``AI_RESEARCH_SMTP_PASSWORD``.
     """
-    host = smtp_host or _os.getenv("FINAI_SMTP_HOST", "")
-    port = smtp_port if smtp_port != 587 else int(_os.getenv("FINAI_SMTP_PORT", "587"))
-    user = smtp_user or _os.getenv("FINAI_SMTP_USER", "")
-    password = smtp_password or _os.getenv("FINAI_SMTP_PASSWORD", "")
+    host = smtp_host or _os.getenv("AI_RESEARCH_SMTP_HOST", "")
+    port = smtp_port if smtp_port != 587 else int(_os.getenv("AI_RESEARCH_SMTP_PORT", "587"))
+    user = smtp_user or _os.getenv("AI_RESEARCH_SMTP_USER", "")
+    password = smtp_password or _os.getenv("AI_RESEARCH_SMTP_PASSWORD", "")
 
     if not host:
         return _json.dumps({
             "status": "not_sent",
             "error": (
-                "SMTP not configured.  Set FINAI_SMTP_HOST, FINAI_SMTP_USER, "
-                "and FINAI_SMTP_PASSWORD environment variables."
+                "SMTP not configured.  Set AI_RESEARCH_SMTP_HOST, AI_RESEARCH_SMTP_USER, "
+                "and AI_RESEARCH_SMTP_PASSWORD environment variables."
             ),
         }, indent=2)
 

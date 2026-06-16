@@ -209,7 +209,7 @@ library = [
             4. Report back with the filepath and delivery status
 
             SMTP must be configured via environment variables:
-            ``FINAI_SMTP_HOST``, ``FINAI_SMTP_USER``, ``FINAI_SMTP_PASSWORD``.
+            ``AI_RESEARCH_SMTP_HOST``, ``AI_RESEARCH_SMTP_USER``, ``AI_RESEARCH_SMTP_PASSWORD``.
             Without SMTP, reports are saved locally and can be shared manually.
 
             You have access to publishing and data tools.  Use
