@@ -511,13 +511,19 @@ if vector_db_names:
             actual_emb_provider = saved_emb_meta["provider"]
             actual_emb_model = saved_emb_meta["model"]
             actual_emb_base_url = saved_emb_meta["base_url"]
-            if actual_emb_provider == "github":
-                os.environ["GITHUB_TOKEN"] = _github_token
-            embeddings = get_embeddings(actual_emb_model, actual_emb_base_url, provider=actual_emb_provider)
+            embeddings = get_embeddings(
+                actual_emb_model,
+                actual_emb_base_url,
+                provider=actual_emb_provider,
+                github_token=_github_token if actual_emb_provider == "github" else None,
+            )
         else:
-            if selected_emb_provider == "github":
-                os.environ["GITHUB_TOKEN"] = _github_token
-            embeddings = get_embeddings(selected_embedding_model, embeddings_base_url, provider=selected_emb_provider)
+            embeddings = get_embeddings(
+                selected_embedding_model,
+                embeddings_base_url,
+                provider=selected_emb_provider,
+                github_token=_github_token if selected_emb_provider == "github" else None,
+            )
     except Exception as e:
         st.sidebar.error(f"Embeddings error: {e}")
 
@@ -545,10 +551,12 @@ if vector_db_names:
             binary = uploaded_file.getvalue()
             if st.button("Process Document and Store in Vector DB", key="process_rag"):
                 with st.spinner("Processing document..."):
+                    _gh_tok = os.environ.get("GITHUB_TOKEN", "")
                     if selected_emb_provider == "github":
-                        _gh_tok = os.environ.get("GITHUB_TOKEN", "")
-                        if _gh_tok:
-                            os.environ["GITHUB_TOKEN"] = _gh_tok
+                        try:
+                            _gh_tok = embedding_github_token or _gh_tok
+                        except NameError:
+                            pass
                     result_upload = process_uploaded_document(
                         file_binary=binary,
                         file_name=uploaded_file.name,
@@ -556,6 +564,7 @@ if vector_db_names:
                         embedding_base_url=embeddings_base_url,
                         emb_provider=selected_emb_provider,
                         source_type=selected_source_type,
+                        github_token=_gh_tok if selected_emb_provider == "github" else None,
                     )
                     st.success("Document processed and stored in the vector database.")
                     st.caption(f"Document processing completed in {result_upload['elapsed']:.2f} seconds.")
@@ -589,58 +598,63 @@ if vector_db_names:
 
     # -- Submit and answer ------------------------------------------------------
     if submit_clicked and question:
-        active_configs = [c for c in query_source_configs if not selected_source_names or c.name in selected_source_names]
-        if not active_configs:
+        if not query_source_configs:
+            st.error("No vector database sources are available. Please load vector databases first.")
+        elif not selected_source_names:
             st.error("Select at least one source group before submitting a question.")
         else:
-            with st.spinner("Answering your question..."):
-                resolve_chat_provider_env(
-                    selected_provider,
-                    github_token=github_token if selected_provider == "github" else "",
-                    deepseek_token=deepseek_token if selected_provider == "deepseek" else "",
-                    deepseek_base_url=deepseek_base_url if selected_provider == "deepseek" else "",
-                    github_endpoint=github_endpoint,
-                    selected_model=selected_model,
-                )
-                result = answer_question(
-                    question,
-                    active_configs,
-                    provider=selected_provider,
-                    system_prompt="You are a concise financial analysis assistant.",
-                    temperature=0.2,
-                    retrieval_mode=retrieval_mode,
-                    auto_truncate_prompt=bool(auto_truncate_prompt),
-                    use_tools=use_tools,
-                )
+            active_configs = [c for c in query_source_configs if c.name in selected_source_names]
+            if not active_configs:
+                st.error("The selected source groups are not available. Please re-select your source groups.")
+            else:
+                with st.spinner("Answering your question..."):
+                    resolve_chat_provider_env(
+                        selected_provider,
+                        github_token=github_token if selected_provider == "github" else "",
+                        deepseek_token=deepseek_token if selected_provider == "deepseek" else "",
+                        deepseek_base_url=deepseek_base_url if selected_provider == "deepseek" else "",
+                        github_endpoint=github_endpoint,
+                        selected_model=selected_model,
+                    )
+                    result = answer_question(
+                        question,
+                        active_configs,
+                        provider=selected_provider,
+                        system_prompt="You are a concise financial analysis assistant.",
+                        temperature=0.2,
+                        retrieval_mode=retrieval_mode,
+                        auto_truncate_prompt=bool(auto_truncate_prompt),
+                        use_tools=use_tools,
+                    )
 
-            llm_response = result.get("response")
-            metadata = result.get("metadata")
-            if not llm_response:
-                st.error("Model returned no response.")
-                st.stop()
+                    llm_response = result.get("response")
+                    metadata = result.get("metadata")
+                    if not llm_response:
+                        st.error("Model returned no response.")
+                        st.stop()
 
-            if metadata and metadata.prompt_truncated:
-                st.warning(f"Prompt was truncated to fit gpt-5 input limits ({metadata.prompt_tokens_before_guard} -> {metadata.prompt_tokens_after_guard} tokens before sending).")
+                    if metadata and metadata.prompt_truncated:
+                        st.warning(f"Prompt was truncated to fit gpt-5 input limits ({metadata.prompt_tokens_before_guard} -> {metadata.prompt_tokens_after_guard} tokens before sending).")
 
-            st.session_state["latest_response"] = {"question": question, "answer": llm_response, "response_type": response_type}
+                    st.session_state["latest_response"] = {"question": question, "answer": llm_response, "response_type": response_type}
 
-            # Store the retrieval result for citation formatting
-            _llm_result = result.get("llm_result")
-            if _llm_result and _llm_result.retrieval:
-                st.session_state["latest_retrieval"] = _llm_result.retrieval
+                    # Store the retrieval result for citation formatting
+                    _llm_result = result.get("llm_result")
+                    if _llm_result and _llm_result.retrieval:
+                        st.session_state["latest_retrieval"] = _llm_result.retrieval
 
-            _history_db = selected_query_vector_dbs[0] if selected_query_vector_dbs else "default"
-            save_history_entry(_history_db, {
-                "question": question,
-                "answer": llm_response,
-                "vector_db": _history_db,
-                "chat_model": selected_model,
-                "provider": selected_provider,
-                "embedding_model": selected_embedding_model,
-                "response_type": response_type,
-                "answer_seconds": result["elapsed"],
-            })
-            st.session_state["question_history"] = load_history(_history_db)
+                    _history_db = selected_query_vector_dbs[0] if selected_query_vector_dbs else "default"
+                    save_history_entry(_history_db, {
+                        "question": question,
+                        "answer": llm_response,
+                        "vector_db": _history_db,
+                        "chat_model": selected_model,
+                        "provider": selected_provider,
+                        "embedding_model": selected_embedding_model,
+                        "response_type": response_type,
+                        "answer_seconds": result["elapsed"],
+                    })
+                    st.session_state["question_history"] = load_history(_history_db)
 
 # ---------------------------------------------------------------------------
 # -- Agent execution & display ---------------------------------------------
@@ -696,11 +710,29 @@ with st.expander("Communication Output", expanded=True):
             st.info("Submit a question in the RAG Query section above to see results here.")
     with agent_tab:
         agent_response = st.session_state.get("agent_response")
-        if agent_response:
-            render_response_output(agent_response, "Markdown", panel_key="agent_response_tab")
-            agent_publication = st.session_state.get("agent_publication")
+        agent_publication = st.session_state.get("agent_publication")
+        if agent_response or agent_publication:
+            # If a publication file exists, offer to view it inline
             if agent_publication:
-                st.caption("Publication Result:")
-                st.code(agent_publication, language="json")
+                try:
+                    pub_data = json.loads(agent_publication) if isinstance(agent_publication, str) else agent_publication
+                    pub_info = pub_data.get("publish", pub_data)
+                    filepath = pub_info.get("filepath", "")
+                    if filepath and Path(filepath).exists():
+                        with st.expander("Published Report Preview", expanded=True):
+                            # Link to open in browser
+                            st.markdown(f"**Published:** [`{filepath}`](file://{filepath})")
+                            # Read and render HTML inline
+                            html_content = Path(filepath).read_text(encoding="utf-8")
+                            components.html(html_content, height=800, scrolling=True)
+                    elif filepath:
+                        st.info(f"Report saved at `{filepath}`.")
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    st.caption("Publication Result:")
+                    st.code(agent_publication, language="json")
+            # Show raw agent response in a collapsible section
+            if agent_response:
+                with st.expander("Raw Agent Response", expanded=not bool(agent_publication)):
+                    render_response_output(agent_response, "Markdown", panel_key="agent_response_tab")
         else:
             st.info("Run an agent in the Agent Workflows section above to see results here.")

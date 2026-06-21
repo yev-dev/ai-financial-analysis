@@ -5,6 +5,7 @@ import math
 import re
 import shutil
 import statistics
+import time
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -387,12 +388,26 @@ def get_ollama_embeddings(model_name: str, base_url: str) -> OllamaEmbeddings:
         ) from exc
 
 
-def get_github_embeddings(model_name: str, base_url: str | None = None) -> object:
-    """Return a lightweight GitHub embeddings adapter. GITHUB_TOKEN is optional.
-    base_url takes precedence over the GITHUB_EMBEDDING_BASE_URL env variable,
-    which in turn takes precedence over GITHUB_ENDPOINT.
+def get_github_embeddings(
+    model_name: str,
+    base_url: str | None = None,
+    github_token: str | None = None,
+) -> object:
+    """Return a lightweight GitHub embeddings adapter.
+
+    GITHUB_TOKEN is optional but recommended — without it GitHub Models
+    rate-limits aggressively (especially for embeddings).
+
+    Parameters
+    ----------
+    model_name : str
+        Embedding model ID (e.g. ``"openai/text-embedding-3-small"``).
+    base_url : str or None
+        API endpoint base URL.  Falls back to env vars / default.
+    github_token : str or None
+        GitHub token for authentication.  Falls back to ``GITHUB_TOKEN`` env var.
     """
-    github_token = os.getenv("GITHUB_TOKEN", "").strip()
+    github_token = github_token or os.getenv("GITHUB_TOKEN", "").strip()
     github_model = model_name or os.getenv("GITHUB_EMBEDDING_MODEL", "openai/text-embedding-3-small").strip()
     github_endpoint = (
         base_url
@@ -451,20 +466,51 @@ def get_github_embeddings(model_name: str, base_url: str | None = None) -> objec
             # Truncate each input to stay within the model's token limit
             truncated = [self._truncate_text(t, self._MODEL_TOKEN_LIMIT) for t in inputs]
             payload = {"model": self.model, "input": truncated}
-            try:
-                resp = requests.post(url, json=payload, headers=self.headers, timeout=30)
-                resp.raise_for_status()
-            except RequestException as re:
-                detail = ""
-                response = getattr(re, "response", None)
-                if response is not None:
-                    response_body = (response.text or "").strip()
-                    if response_body:
-                        detail = f" Response body: {response_body[:600]}"
-                raise RuntimeError(
-                    f"Failed to call GitHub embeddings endpoint {url}: {re}.{detail} "
-                    f"Ensure the selected model supports embeddings (for example: openai/text-embedding-3-small)."
-                ) from re
+
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    resp = requests.post(url, json=payload, headers=self.headers, timeout=30)
+                    if resp.status_code == 429 and attempt < max_retries - 1:
+                        sleep_time = 2 ** attempt
+                        import warnings as _w
+                        _w.warn(
+                            f"GitHub embeddings rate limited (429), retrying in {sleep_time}s "
+                            f"(attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(sleep_time)
+                        continue
+                    resp.raise_for_status()
+                    break
+                except RequestException as re:
+                    if attempt < max_retries - 1:
+                        status = getattr(getattr(re, "response", None), "status_code", None)
+                        if status == 429:
+                            sleep_time = 2 ** attempt
+                            import warnings as _w
+                            _w.warn(
+                                f"GitHub embeddings rate limited (429), retrying in {sleep_time}s "
+                                f"(attempt {attempt + 1}/{max_retries})"
+                            )
+                            time.sleep(sleep_time)
+                            continue
+                    detail = ""
+                    response = getattr(re, "response", None)
+                    if response is not None:
+                        response_body = (response.text or "").strip()
+                        if response_body:
+                            detail = f" Response body: {response_body[:600]}"
+                    status = getattr(getattr(re, "response", None), "status_code", None)
+                    if status == 429:
+                        raise RuntimeError(
+                            f"GitHub Models API rate limit exceeded after {max_retries} retries. "
+                            f"Set a GITHUB_TOKEN in the sidebar (Embeddings section) or in your .env "
+                            f"file for higher rate limits.{detail}"
+                        ) from re
+                    raise RuntimeError(
+                        f"Failed to call GitHub embeddings endpoint {url}: {re}.{detail} "
+                        f"Ensure the selected model supports embeddings (for example: openai/text-embedding-3-small)."
+                    ) from re
 
             data = resp.json()
 
@@ -504,7 +550,12 @@ def get_github_embeddings(model_name: str, base_url: str | None = None) -> objec
     return GitHubEmbeddings(model=github_model, endpoint=github_endpoint, token=github_token)
 
 
-def get_embeddings(model_name: str, base_url: str, provider: str = "ollama") -> object:
+def get_embeddings(
+    model_name: str,
+    base_url: str,
+    provider: str = "ollama",
+    github_token: str | None = None,
+) -> object:
     """
     Return embeddings instance based on provider selection.
     provider: "ollama", "github", or "deepseek"
@@ -512,6 +563,6 @@ def get_embeddings(model_name: str, base_url: str, provider: str = "ollama") -> 
     if provider == "ollama":
         return get_ollama_embeddings(model_name, base_url)
     elif provider in ("github", "deepseek"):
-        return get_github_embeddings(model_name, base_url=base_url)
+        return get_github_embeddings(model_name, base_url=base_url, github_token=github_token)
     else:
         raise ValueError(f"Unknown provider: {provider}")

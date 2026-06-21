@@ -146,6 +146,7 @@ def process_uploaded_document(
     emb_provider: str,
     source_type: str,
     temp_dir: Path | str | None = None,
+    github_token: str | None = None,
 ) -> dict[str, Any]:
     """Index an uploaded document into a FAISS vector store."""
     from hashlib import md5
@@ -170,7 +171,12 @@ def process_uploaded_document(
     document_metadata["file_size"] = len(file_binary)
     chunks = get_markdown_splits(markdown_content, metadata=document_metadata)
 
-    embeddings = get_embeddings(embedding_model, embedding_base_url, provider=emb_provider)
+    embeddings = get_embeddings(
+        embedding_model,
+        embedding_base_url,
+        provider=emb_provider,
+        github_token=github_token if emb_provider == "github" else None,
+    )
     vector_store = create_or_load_vector_store(base_name, chunks, embeddings)
     save_embedding_metadata(base_name, provider=emb_provider, model=embedding_model, base_url=embedding_base_url)
 
@@ -203,7 +209,9 @@ def load_vector_stores_for_query(
     import faiss
 
     loaded: dict[str, FAISS] = {}
-    _dims_checked: dict[str, int] = {}
+
+    # Probe embedding dimension once — shared across all stores
+    _dimension: int | None = None
 
     for name in selected_vector_db_names:
         if name not in source_vector_stores:
@@ -215,18 +223,14 @@ def load_vector_stores_for_query(
 
         vs = FAISS.load_local(faiss_load_dir, embeddings=embeddings, allow_dangerous_deserialization=True)
 
-        index_d = vs.index.d
-        if name not in _dims_checked:
+        if _dimension is None:
             probe = embeddings.embed_query("dimension probe")
-            emb_d = len(probe)
-            _dims_checked[name] = emb_d
-        else:
-            emb_d = _dims_checked[name]
+            _dimension = len(probe)
 
-        if emb_d != index_d:
+        if _dimension != vs.index.d:
             raise ValueError(
                 f"Embedding dimension mismatch for vector store '{name}': "
-                f"index={index_d}, embedding={emb_d}"
+                f"index={vs.index.d}, embedding={_dimension}"
             )
 
         loaded[name] = vs
@@ -415,6 +419,7 @@ def run_agent_task(
         embedding_model=embedding_model or None,
         embedding_provider=embedding_provider or None,
         embedding_base_url=embedding_base_url or None,
+        github_token=os.environ.get("GITHUB_TOKEN") or None,
     )
 
     _retrieve_config = {

@@ -91,6 +91,7 @@ def _ensure_initialised(
     embedding_provider: str | None = None,
     embedding_base_url: str | None = None,
     selected_dbs: list[str] | None = None,
+    github_token: str | None = None,
 ) -> None:
     """Initialise the engine bridge state (idempotent).
 
@@ -108,6 +109,8 @@ def _ensure_initialised(
         standard endpoint (Ollama localhost or GitHub inference).
     selected_dbs : list[str], optional
         Specific vector DB names to load.  If None, loads all available.
+    github_token : str, optional
+        GitHub token for embeddings authentication.  Falls back to env var.
     """
     if _state.initialised:
         return
@@ -131,6 +134,7 @@ def _ensure_initialised(
         model_name=emb_model,
         base_url=emb_base,
         provider=emb_provider,
+        github_token=github_token if emb_provider == "github" else None,
     )
 
     _state.source_vector_stores = get_source_vector_stores()
@@ -149,6 +153,9 @@ def _ensure_initialised(
                         model_name=meta["model"],
                         base_url=meta["base_url"],
                         provider=meta["provider"],
+                        github_token=(
+                            github_token if meta["provider"] == "github" else None
+                        ),
                     )
                 else:
                     db_emb = _state.embeddings
@@ -508,6 +515,7 @@ def init_engine(
     embedding_provider: str | None = None,
     embedding_base_url: str | None = None,
     selected_dbs: list[str] | None = None,
+    github_token: str | None = None,
 ) -> dict[str, Any]:
     """Initialise the engine bridge and return a status summary.
 
@@ -524,6 +532,7 @@ def init_engine(
         embedding_provider=embedding_provider,
         embedding_base_url=embedding_base_url,
         selected_dbs=selected_dbs,
+        github_token=github_token,
     )
     return {
         "status": "initialised",
