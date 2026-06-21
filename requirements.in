@@ -16,6 +16,8 @@ langchain-text-splitters
 autogen
 langchain
 pdf2image
+weasyprint
+markdown
 Pillow
 pymupdf
 python-dotenv

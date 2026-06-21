@@ -304,3 +304,8 @@ pip-sync requirements.txt
 - [AutoGen](https://github.com/microsoft/autogen) — Multi-agent conversation framework
   from Microsoft Research
 - [FAISS](https://github.com/facebookresearch/faiss) — Facebook AI Similarity Search
+
+- [Financial AI Agent](https://github.com/lenaar/financial-ai-agent) - Financial Analysis AI Agent
+- [TradingAgents](https://github.com/TauricResearch/TradingAgents/tree/main) - TradingAgents: Multi-Agents LLM Financial Trading Framework
+- [MCP Server](https://towardsdatascience.com/model-context-protocol-mcp-tutorial-build-your-first-mcp-server-in-6-steps/) - Model Context Protocol (MCP) Tutorial: Build Your First MCP Server in 6 Steps
+- [Financial News](https://github.com/Kumaran-Elumalai/ai-powered-financial-news-intelligence-system-using-langgraph) - News system

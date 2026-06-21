@@ -1,49 +1,52 @@
-import os
+"""
+Dashboard package — re-exports configuration from ``fin_ai.config.fin_ai``
+for backward compatibility.  Prefer importing directly from ``fin_ai.config``
+in new code.
+"""
+
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
-
+# .env loading is handled by fin_ai.config.fin_ai on first import
 
 BASE_DIR = Path(__file__).resolve().parent
 PARENT_DIR = BASE_DIR.parent
 SRC_DIR = PARENT_DIR / "src"
 
-# Load project-level .env without overriding already-exported environment variables.
-load_dotenv(PARENT_DIR / ".env", override=False)
-
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-_vector_db_env = os.environ.get("VECTOR_DB_DIR", "").strip()
-VECTOR_DB_DIR = _vector_db_env or str(PARENT_DIR / "vector_db")
-OLLAMA_BASE_URL = "http://localhost:11434"
-DEFAULT_GITHUB_MODEL = "openai/gpt-4o"
-DEFAULT_GITHUB_EMBEDDING_MODEL = "openai/text-embedding-3-small"
-GITHUB_EMBEDDING_BASE_URL = "https://models.github.ai/inference"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-DEFAULT_CHAT_MODEL = "deepseek-r1:1.5b"
-DEFAULT_EMBEDDING_MODEL = "nomic-embed-text:latest"
-DEFAULT_EMBEDDINGS_PROVIDER = os.getenv("DEFAULT_EMBEDDINGS_PROVIDER", "ollama").strip().lower()
-QUESTION_HISTORY_DIR = Path(VECTOR_DB_DIR) / "question_history"
-
-os.makedirs(VECTOR_DB_DIR, exist_ok=True)
-os.makedirs(QUESTION_HISTORY_DIR, exist_ok=True)
+# Re-export all configuration from the central config module
+from fin_ai.config.fin_ai import (  # noqa: E402, F401
+    # Paths
+    VECTOR_DB_DIR,
+    QUESTION_HISTORY_DIR,
+    # Provider URLs
+    OLLAMA_BASE_URL,
+    GITHUB_EMBEDDING_BASE_URL,
+    DEEPSEEK_BASE_URL,
+    # Default models
+    DEFAULT_CHAT_MODEL,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDINGS_PROVIDER,
+    DEFAULT_GITHUB_MODEL,
+    DEFAULT_GITHUB_EMBEDDING_MODEL,
+    DEFAULT_DEEPSEEK_MODEL,
+)
 
 __all__ = [
     "BASE_DIR",
     "PARENT_DIR",
     "SRC_DIR",
     "VECTOR_DB_DIR",
+    "QUESTION_HISTORY_DIR",
     "OLLAMA_BASE_URL",
-    "DEFAULT_GITHUB_MODEL",
-    "DEFAULT_GITHUB_EMBEDDING_MODEL",
     "GITHUB_EMBEDDING_BASE_URL",
-    "DEFAULT_DEEPSEEK_MODEL",
     "DEEPSEEK_BASE_URL",
     "DEFAULT_CHAT_MODEL",
     "DEFAULT_EMBEDDING_MODEL",
     "DEFAULT_EMBEDDINGS_PROVIDER",
-    "QUESTION_HISTORY_DIR",
+    "DEFAULT_GITHUB_MODEL",
+    "DEFAULT_GITHUB_EMBEDDING_MODEL",
+    "DEFAULT_DEEPSEEK_MODEL",
 ]

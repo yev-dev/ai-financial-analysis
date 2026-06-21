@@ -165,7 +165,9 @@ from email.mime.base import MIMEBase as _MIMEBase
 from email import encoders as _encoders
 from pathlib import Path as _Path
 
-_OUTPUT_DIR = _Path(_os.getcwd()) / "published_research"
+from fin_ai.config.fin_ai import PUBLISHED_RESEARCH_DIR
+
+_OUTPUT_DIR = _Path(PUBLISHED_RESEARCH_DIR)
 _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 _HTML_TEMPLATE = """<!DOCTYPE html>

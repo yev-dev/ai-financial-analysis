@@ -6,7 +6,7 @@ that can be registered as a tool for autogen agents.  This uses autogen's
 built-in retrieval (file-based, chunked).
 
 For local FAISS vector store queries, see ``fin_ai.agents.engine_bridge.query_local_rag``
-which wraps ``fin_ai.core.fin_ai_engine.answer_question``.
+which wraps ``fin_ai.core.processor.answer_question``.
 """
 
 from __future__ import annotations

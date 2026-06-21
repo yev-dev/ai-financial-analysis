@@ -1,14 +1,17 @@
-"""Backend engine for the financial analyst dashboard.
+"""
+Request Processor — handles all RAG queries and agent interactions.
 
-Contains all business logic, data processing, query execution, and environment
-management extracted from the Streamlit presentation layer.  This module is
-imported by ``dashboard.financial_analyst_dashboard`` and can also be used
-standalone for scripting / testing.
+This is the central processing module used by the dashboard, notebooks,
+and agent framework.  It consolidates:
+- RAG query execution (vector store loading, question answering)
+- Agent creation and execution (single-shot agent tasks)
+- Provider configuration and model resolution
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from time import perf_counter
@@ -16,17 +19,17 @@ from typing import Any, Sequence
 
 from langchain_community.vectorstores import FAISS
 
-import logging
+import openai
 
 from fin_ai.core.request import ModelRequest, RequestPayload
 from fin_ai.core.query import (
     SourceRetrieverConfig,
     query_with_multi_source_prompting,
     build_source_retriever_configs,
-    format_source_citations,
 )
 
 logger = logging.getLogger(__name__)
+
 from fin_ai.core.rag import (
     create_or_load_vector_store,
     discover_vector_stores_by_source,
@@ -44,24 +47,23 @@ from dashboard.utils import (
     load_question_history,
     purge_vector_db_assets,
 )
-from dashboard import (
-    DEFAULT_GITHUB_MODEL,
-    DEFAULT_GITHUB_EMBEDDING_MODEL,
-    DEFAULT_DEEPSEEK_MODEL,
+
+# Config
+from fin_ai.config.fin_ai import (
+    VECTOR_DB_DIR,
+    OLLAMA_BASE_URL,
     DEFAULT_CHAT_MODEL,
     DEFAULT_EMBEDDING_MODEL,
-    OLLAMA_BASE_URL,
+    DEFAULT_EMBEDDINGS_PROVIDER,
+    GITHUB_EMBEDDING_BASE_URL,
     QUESTION_HISTORY_DIR,
-    VECTOR_DB_DIR,
+    SUPPORTED_UPLOAD_TYPES,
+    SUPPORTED_SOURCE_SUFFIXES,
 )
 
 
-SUPPORTED_UPLOAD_TYPES = ["pdf", "csv", "json", "html", "docx"]
-SUPPORTED_SOURCE_SUFFIXES = [".pdf", ".csv", ".json", ".html", ".docx"]
-
-
 # ---------------------------------------------------------------------------
-# Configuration / defaults
+# Configuration / environment
 # ---------------------------------------------------------------------------
 
 
@@ -113,7 +115,7 @@ def fetch_models(
 
 
 def find_source_document(vector_db_name: str) -> Path | None:
-    """Locate the original source file for a vector DB by trying known suffixes."""
+    """Locate the original source file for a vector DB."""
     for suffix in SUPPORTED_SOURCE_SUFFIXES:
         candidate = Path(VECTOR_DB_DIR) / f"{vector_db_name}{suffix}"
         if candidate.exists():
@@ -132,7 +134,7 @@ def get_vector_db_names(vector_stores: dict[str, Path]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Document upload / indexing
+# Document indexing
 # ---------------------------------------------------------------------------
 
 
@@ -145,11 +147,7 @@ def process_uploaded_document(
     source_type: str,
     temp_dir: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Index an uploaded document into a FAISS vector store.
-
-    Returns a dict with keys ``vector_db_name``, ``elapsed``, and
-    ``doc_metadata``.
-    """
+    """Index an uploaded document into a FAISS vector store."""
     from hashlib import md5
 
     upload_hash = md5(file_binary).hexdigest()
@@ -192,7 +190,7 @@ def process_uploaded_document(
 
 
 # ---------------------------------------------------------------------------
-# Vector store loading for querying
+# Vector store loading
 # ---------------------------------------------------------------------------
 
 
@@ -201,17 +199,11 @@ def load_vector_stores_for_query(
     source_vector_stores: dict[str, Path],
     embeddings: Any,
 ) -> dict[str, FAISS]:
-    """Load FAISS vector stores for the selected names.
-
-    Each store is loaded with the provided ``embeddings`` instance.
-    After loading, a dimension sanity-check is performed: the embedding
-    vector dimension produced by *embeddings* must match the FAISS index
-    dimension, otherwise a ``ValueError`` is raised with a clear message.
-    """
+    """Load FAISS vector stores with dimension sanity checks."""
     import faiss
 
     loaded: dict[str, FAISS] = {}
-    _dims_checked: dict[str, int] = {}  # cache: embedding dimension per name
+    _dims_checked: dict[str, int] = {}
 
     for name in selected_vector_db_names:
         if name not in source_vector_stores:
@@ -223,10 +215,8 @@ def load_vector_stores_for_query(
 
         vs = FAISS.load_local(faiss_load_dir, embeddings=embeddings, allow_dangerous_deserialization=True)
 
-        # -- Dimension sanity check -----------------------------------------
         index_d = vs.index.d
         if name not in _dims_checked:
-            # Probe the embedding dimension once per unique embedding config
             probe = embeddings.embed_query("dimension probe")
             emb_d = len(probe)
             _dims_checked[name] = emb_d
@@ -236,10 +226,7 @@ def load_vector_stores_for_query(
         if emb_d != index_d:
             raise ValueError(
                 f"Embedding dimension mismatch for vector store '{name}': "
-                f"the FAISS index has dimension {index_d}, but the selected "
-                f"embedding model produces vectors of dimension {emb_d}. "
-                f"Use the same embedding model that was used to create the "
-                f"vector store."
+                f"index={index_d}, embedding={emb_d}"
             )
 
         loaded[name] = vs
@@ -277,11 +264,7 @@ def answer_question(
     use_tools: bool = False,
     response_format: str = "text",
 ) -> dict[str, Any]:
-    """Run a query against the selected vector stores and return results.
-
-    Returns a dict with keys ``response``, ``metadata``, ``llm_result``,
-    ``elapsed``.
-    """
+    """Run a RAG query against the selected vector stores."""
     start_time = perf_counter()
 
     effective_system = _build_tool_aware_system_prompt(system_prompt) if use_tools else system_prompt
@@ -304,32 +287,7 @@ def answer_question(
         first_message = llm_response.get_metadata().raw_response.choices[0].message
         tool_calls = _extract_tool_calls(first_message)
         if tool_calls:
-            follow_up_messages: list[dict[str, Any]] = [
-                {"role": "system", "content": effective_system},
-                {"role": "user", "content": llm_result.prompt},
-                {
-                    "role": "assistant",
-                    "content": first_message.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc["id"],
-                            "type": "function",
-                            "function": {"name": tc["name"], "arguments": tc["arguments_text"]},
-                        }
-                        for tc in tool_calls
-                    ],
-                },
-            ]
-            for tc in tool_calls:
-                tool_result = execute_litellm_tool_call(tc["name"], tc["arguments"])
-                follow_up_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "name": tc["name"] or "unknown_tool",
-                        "content": json.dumps(tool_result),
-                    }
-                )
+            follow_up_messages = _build_tool_follow_up(effective_system, llm_result.prompt, first_message, tool_calls)
             follow_up_payload = RequestPayload(
                 prompt=question,
                 system_prompt=effective_system,
@@ -350,6 +308,208 @@ def answer_question(
         "llm_result": llm_result,
         "elapsed": perf_counter() - start_time,
     }
+
+
+# ---------------------------------------------------------------------------
+# Agent execution
+# ---------------------------------------------------------------------------
+
+
+def build_agent_llm_config(
+    provider: str,
+    model: str,
+    *,
+    ollama_base_url: str = "",
+    github_endpoint: str = "",
+    github_token: str = "",
+    deepseek_base_url: str = "",
+    deepseek_token: str = "",
+) -> dict[str, Any]:
+    """Build an AutoGen-compatible llm_config from provider settings.
+
+    Parameters
+    ----------
+    provider : str
+        ``"ollama"``, ``"github"``, or ``"deepseek"``.
+    model : str
+        Model identifier (e.g. ``"llama3.1"``, ``"openai/gpt-4o"``).
+    """
+    if provider == "github":
+        return {
+            "config_list": [
+                {"model": model, "base_url": github_endpoint, "api_key": github_token}
+            ],
+            "temperature": 0,
+            "timeout": 120,
+        }
+    elif provider == "deepseek":
+        return {
+            "config_list": [
+                {"model": model, "base_url": deepseek_base_url, "api_key": deepseek_token}
+            ],
+            "temperature": 0,
+            "timeout": 120,
+        }
+    else:
+        base = ollama_base_url or OLLAMA_BASE_URL
+        return {
+            "config_list": [
+                {"model": model, "base_url": base, "api_key": "ollama"}
+            ],
+            "temperature": 0,
+            "timeout": 120,
+        }
+
+
+def run_agent_task(
+    agent_name: str,
+    prompt: str,
+    llm_config: dict[str, Any],
+    *,
+    embedding_model: str = "",
+    embedding_provider: str = "",
+    embedding_base_url: str = "",
+    chat_provider: str = "ollama",
+    is_publisher: bool = False,
+    publisher_format: str = "html",
+    publisher_email: str = "",
+) -> dict[str, Any]:
+    """Run a single agent task and return the response.
+
+    This is the primary entry point for programmatic agent interaction
+    from the dashboard, notebooks, or any script.
+
+    Parameters
+    ----------
+    agent_name : str
+        Agent profile name (e.g. ``"Data_Analyst"``, ``"Research_Publisher"``).
+    prompt : str
+        Task prompt to send to the agent.
+    llm_config : dict
+        AutoGen-compatible LLM config (use ``build_agent_llm_config`` to build).
+    embedding_model : str
+        Embedding model for initialising the engine bridge.
+    embedding_provider : str
+        Embedding provider (``"ollama"`` or ``"github"``).
+    embedding_base_url : str
+        Embedding API base URL.
+    chat_provider : str
+        Chat provider for RAG queries.
+    is_publisher : bool
+        If True, uses ``SingleAssistant`` (no RAG); otherwise ``SingleAssistantRAG``.
+    publisher_format : str
+        Report format for Research_Publisher (``"html"`` or ``"pdf"``).
+    publisher_email : str
+        Optional email address to send the report to.
+
+    Returns
+    -------
+    dict with keys ``response``, ``agent_name``, ``success``, ``error`` (if failed).
+    """
+    from fin_ai.agents import SingleAssistantRAG, SingleAssistant, init_engine
+    from fin_ai.agents.engine_bridge import publish_research_report
+
+    # Initialise the engine bridge for local RAG
+    init_engine(
+        chat_provider=chat_provider,
+        embedding_model=embedding_model or None,
+        embedding_provider=embedding_provider or None,
+        embedding_base_url=embedding_base_url or None,
+    )
+
+    _retrieve_config = {
+        "task": "qa",
+        "vector_db": None,
+        "docs_path": [],
+        "chunk_token_size": 1000,
+        "get_or_create": False,
+        "collection_name": "processor_agent_rag",
+        "must_break_at_empty_line": False,
+        "customized_prompt": (
+            "Context from local stores:\n{input_context}\n\n"
+            "Query: {input_question}"
+        ),
+    }
+
+    try:
+        if is_publisher:
+            agent = SingleAssistant(
+                agent_name,
+                llm_config=llm_config,
+                human_input_mode="NEVER",
+                max_consecutive_auto_reply=8,
+                code_execution_config=False,
+            )
+            # Append publishing instruction
+            full_prompt = prompt.strip()
+            if publisher_email:
+                full_prompt += (
+                    f"\n\nAfter analysis, publish as {publisher_format} and email to {publisher_email}."
+                )
+            else:
+                full_prompt += f"\n\nAfter analysis, publish as {publisher_format}."
+        else:
+            agent = SingleAssistantRAG(
+                agent_name,
+                llm_config=llm_config,
+                human_input_mode="NEVER",
+                max_consecutive_auto_reply=8,
+                code_execution_config=False,
+                retrieve_config=_retrieve_config,
+                rag_description="Query local FAISS vector stores for financial context.",
+            )
+            full_prompt = prompt
+
+        agent.chat(full_prompt)
+
+        # Extract last message
+        history = agent.user_proxy.chat_messages
+        response = ""
+        if history:
+            last_agent = list(history.keys())[-1]
+            msgs = history[last_agent]
+            if msgs:
+                response = msgs[-1].get("content", "")
+
+        pub_result = None
+        if is_publisher:
+            try:
+                pub_result = publish_research_report(
+                    content=response or prompt,
+                    title=f"{agent_name} Report",
+                    format=publisher_format,
+                    email=publisher_email,
+                )
+            except Exception:
+                pass
+
+        return {
+            "response": response,
+            "agent_name": agent_name,
+            "success": True,
+            "publication": pub_result,
+        }
+
+    except openai.APIConnectionError as exc:
+        logger.exception("API connection error for agent '%s'", agent_name)
+        return {
+            "response": "",
+            "agent_name": agent_name,
+            "success": False,
+            "error": (
+                f"Cannot connect to the LLM provider. "
+                f"Check that your model endpoint is running and reachable. "
+                f"Details: {exc}"
+            ),
+        }
+    except Exception as exc:
+        logger.exception("Agent task '%s' failed", agent_name)
+        return {
+            "response": "",
+            "agent_name": agent_name,
+            "success": False,
+            "error": str(exc),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -375,7 +535,7 @@ def purge_vector_db(vector_db_name: str) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Helpers ported from the original presentation layer
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 
@@ -387,16 +547,11 @@ def _build_tool_aware_system_prompt(base_prompt: str | None) -> str:
     ]
     tool_names = [name for name in tool_names if name]
     available = ", ".join(tool_names) if tool_names else "none"
-
     guidance = (
-        "You have access to function tools via YAHOO_FINANCE_TOOLS. "
-        f"Available tools: {available}. "
-        "When the user asks for stock prices, company facts, dividends, financial statements, "
-        "or analyst recommendations, call the most appropriate tool instead of guessing. "
-        "Use the exact tool arguments required by the schema. "
-        "After tool output is returned, summarize clearly and reference the returned data."
+        f"You have access to function tools. Available: {available}. "
+        "When asked for stock data, financials, or analyst recs, call the "
+        "appropriate tool instead of guessing."
     )
-
     base = (base_prompt or "").strip()
     if guidance in base:
         return base
@@ -409,7 +564,6 @@ def _extract_tool_calls(message: object) -> list[dict]:
     tool_calls = getattr(message, "tool_calls", None)
     if not tool_calls:
         return []
-
     extracted: list[dict] = []
     for tc in tool_calls:
         if isinstance(tc, dict):
@@ -422,17 +576,43 @@ def _extract_tool_calls(message: object) -> list[dict]:
             name = getattr(fn, "name", None)
             args_text = getattr(fn, "arguments", "{}")
             call_id = getattr(tc, "id", None)
-
         try:
             arguments = json.loads(args_text or "{}")
         except json.JSONDecodeError:
             arguments = {}
-
         extracted.append({
             "id": call_id or f"call_{len(extracted)}",
             "name": name,
             "arguments": arguments,
             "arguments_text": args_text or "{}",
         })
-
     return extracted
+
+
+def _build_tool_follow_up(
+    system: str,
+    prompt: str,
+    first_message: Any,
+    tool_calls: list[dict],
+) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+        {
+            "role": "assistant",
+            "content": first_message.content or "",
+            "tool_calls": [
+                {"id": tc["id"], "type": "function", "function": {"name": tc["name"], "arguments": tc["arguments_text"]}}
+                for tc in tool_calls
+            ],
+        },
+    ]
+    for tc in tool_calls:
+        tool_result = execute_litellm_tool_call(tc["name"], tc["arguments"])
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc["id"],
+            "name": tc["name"] or "unknown_tool",
+            "content": json.dumps(tool_result),
+        })
+    return messages

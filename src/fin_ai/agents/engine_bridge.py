@@ -1,10 +1,10 @@
 """
-Engine Bridge — connects the agentic framework to fin_ai_engine.
+Engine Bridge — connects the agentic framework to processor.
 
 Provides callable tools that agents can use to query the local RAG
 infrastructure (FAISS vector stores), discover available models/providers,
 access financial data, and run structured multi-source queries — all powered
-by ``fin_ai.core.fin_ai_engine``, ``fin_ai.core.providers``, ``fin_ai.core.query``,
+by ``fin_ai.core.processor``, ``fin_ai.core.providers``, ``fin_ai.core.query``,
 ``fin_ai.core.request``, and ``fin_ai.core.response``.
 
 These functions are designed for ``autogen.register_function()`` —
@@ -112,7 +112,7 @@ def _ensure_initialised(
     if _state.initialised:
         return
 
-    from fin_ai.core.fin_ai_engine import (
+    from fin_ai.core.processor import (
         get_source_vector_stores,
         get_vector_db_names,
         load_vector_stores_for_query,
@@ -218,7 +218,7 @@ def query_local_rag(
             "Streamlit dashboard first: streamlit run dashboard/financial_analyst_dashboard.py"
         )
 
-    from fin_ai.core.fin_ai_engine import answer_question
+    from fin_ai.core.processor import answer_question
 
     result = answer_question(
         question=query,
@@ -435,7 +435,7 @@ def query_with_routed_rag(
     if not _state.source_configs:
         return "[Routed RAG] No vector stores available."
 
-    from fin_ai.core.fin_ai_engine import answer_question
+    from fin_ai.core.processor import answer_question
 
     # Route query to best sources
     selected = route_query_to_sources(
@@ -535,6 +535,47 @@ def init_engine(
 
 
 # ---------------------------------------------------------------------------
+# Agent introspection tool
+# ---------------------------------------------------------------------------
+
+
+def list_agent_profiles(name_filter: str = "") -> str:
+    """Return a structured summary of all registered agent profiles.
+
+    Each agent's profile includes its purpose, tools, and capabilities.
+    Useful for understanding which agent to use for a given task.
+
+    Parameters
+    ----------
+    name_filter : str
+        Optional agent name to filter by (case-insensitive, partial match).
+        If empty, returns all agents.
+    """
+    from .agent_library import library
+
+    lines: list[str] = ["Registered Agents:\n"]
+    for agent_name, config in library.items():
+        if name_filter and name_filter.lower() not in agent_name.lower():
+            continue
+        lines.append(f"## {agent_name}")
+        profile = config.get("profile", "")
+        # Extract a short description from the profile (first ~200 chars)
+        short = profile.strip()[:200].replace("\n", " ").strip()
+        lines.append(f"  Role: {short}...")
+        tools = config.get("tools", [])
+        if tools:
+            lines.append(f"  Tools ({len(tools)}): {', '.join(tools)}")
+        lines.append("")
+
+    if not name_filter and not lines:
+        return "No agents registered."
+    if name_filter and len(lines) == 1:
+        return f"No agents found matching '{name_filter}'."
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Tool name → callable map (for workflow.py registration)
 # ---------------------------------------------------------------------------
 
@@ -552,4 +593,5 @@ ENGINE_BRIDGE_TOOLS: dict[str, Any] = {
     "publish_research_pdf": publish_research_pdf,
     "publish_research_report": publish_research_report,
     "send_research_email": send_research_email,
+    "list_agent_profiles": list_agent_profiles,
 }

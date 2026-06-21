@@ -115,7 +115,7 @@ class AIAgent(AssistantAgent):
         if isinstance(agent_config, str):
             orig_name = agent_config
             name = orig_name.replace("_Shadow", "")
-            assert name in library, f"FinRobot '{name}' not found in agent library."
+            assert name in library, f"AIAgent '{name}' not found in agent library."
             agent_config = library[name]
 
         agent_config = self._preprocess_config(agent_config)
