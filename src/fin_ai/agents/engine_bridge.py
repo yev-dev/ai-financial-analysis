@@ -23,14 +23,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from dashboard import (
+from fin_ai.config.fin_ai import (
     VECTOR_DB_DIR,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDINGS_PROVIDER,
     OLLAMA_BASE_URL,
     GITHUB_EMBEDDING_BASE_URL,
 )
-from dashboard.utils import get_embeddings
+from fin_ai.core.embeddings import create_embeddings
 
 # Core module imports (used by tools below)
 from fin_ai.core.providers import list_models, ModelInfo
@@ -38,23 +38,14 @@ from fin_ai.core.query import (
     SourceRetrieverConfig,
     MultiSourceQueryResult,
     MultiSourcePromptResult,
-    retrieve_multi_source_documents,
-    build_multi_source_prompt,
-    collect_source_citations,
     format_source_citations,
     route_query_to_sources,
 )
 from fin_ai.core.request import (
-    ModelRequestFactory,
+    known_providers,
     resolve_model_name,
-    RequestPayload,
 )
-from fin_ai.core.response import (
-    Provider,
-    ResponseMetadata,
-    ModelResponse,
-    ResponseFactory,
-)
+
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +90,7 @@ def _ensure_initialised(
     ----------
     chat_provider : str
         Provider for chat/answer generation (``"ollama"``, ``"github"``,
-        ``"deepseek"``).
+        ``"deepseek"``, ``"proxied_github"``, ``"proxied_deepseek"``).
     embedding_model : str, optional
         Override for the embedding model name.
     embedding_provider : str, optional
@@ -111,6 +102,7 @@ def _ensure_initialised(
         Specific vector DB names to load.  If None, loads all available.
     github_token : str, optional
         GitHub token for embeddings authentication.  Falls back to env var.
+        Not needed for ``proxied_github``.
     """
     if _state.initialised:
         return
@@ -130,11 +122,13 @@ def _ensure_initialised(
         GITHUB_EMBEDDING_BASE_URL if emb_provider == "github" else OLLAMA_BASE_URL
     )
 
-    _state.embeddings = get_embeddings(
-        model_name=emb_model,
-        base_url=emb_base,
+    # GitHub token is optional for embeddings — proxied providers don't need it
+    _needs_gh_token = emb_provider == "github" and chat_provider not in ("proxied_github",)
+    _state.embeddings = create_embeddings(
         provider=emb_provider,
-        github_token=github_token if emb_provider == "github" else None,
+        model=emb_model,
+        api_base=emb_base,
+        api_key=github_token if _needs_gh_token else None,
     )
 
     _state.source_vector_stores = get_source_vector_stores()
@@ -149,12 +143,13 @@ def _ensure_initialised(
                 from fin_ai.core.rag import load_embedding_metadata
                 meta = load_embedding_metadata(db_name)
                 if meta:
-                    db_emb = get_embeddings(
-                        model_name=meta["model"],
-                        base_url=meta["base_url"],
+                    _needs_gh_token_meta = meta["provider"] == "github" and chat_provider not in ("proxied_github",)
+                    db_emb = create_embeddings(
                         provider=meta["provider"],
-                        github_token=(
-                            github_token if meta["provider"] == "github" else None
+                        model=meta["model"],
+                        api_base=meta["base_url"],
+                        api_key=(
+                            github_token if _needs_gh_token_meta else None
                         ),
                     )
                 else:
@@ -291,10 +286,8 @@ def get_provider_info() -> str:
     """Return the current provider/connection status.
 
     Reports which chat and embedding providers are configured, which models
-    are resolved for each, and lists all available providers registered in
-    ``ModelRequestFactory`` and ``ResponseFactory``.
-
-    Uses ``fin_ai.core.request`` and ``fin_ai.core.response`` directly.
+    are resolved for each, and lists all registered provider configs
+    with their required and optional parameters.
     """
     _ensure_initialised()
 
@@ -305,15 +298,20 @@ def get_provider_info() -> str:
         f"Embedding model:  {DEFAULT_EMBEDDING_MODEL}",
         f"Embedding prov:   {DEFAULT_EMBEDDINGS_PROVIDER}",
         "",
-        "Registered request providers (ModelRequestFactory):",
+        "Registered provider configs:",
     ]
-    for p in ModelRequestFactory.available():
-        resolved = resolve_model_name(p)
-        lines.append(f"  • {p} → {resolved}")
+    for p_name, p_cfg in known_providers().items():
+        required = ", ".join(p_cfg.required_params) if p_cfg.required_params else "none"
+        optional = ", ".join(p_cfg.optional_params) if p_cfg.optional_params else "none"
+        lines.append(f"  • {p_name}")
+        lines.append(f"      label:     {p_cfg.label}")
+        lines.append(f"      required:  {required}")
+        lines.append(f"      optional:  {optional}")
 
     lines.append("")
     lines.append("Supported response formats (ResponseFactory):")
-    for fmt in ResponseFactory.available():
+    from fin_ai.core.response import ResponseFactory as _RF
+    for fmt in _RF.available():
         lines.append(f"  • {fmt}")
 
     lines.append("")

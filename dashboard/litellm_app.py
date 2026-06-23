@@ -1,103 +1,25 @@
 import os
-from dataclasses import asdict
 import json
 
 import streamlit as st
 
-# Import dashboard first so dashboard/__init__.py runs and bootstraps paths.
-from dashboard import DEFAULT_GITHUB_MODEL, DEFAULT_DEEPSEEK_MODEL, DEEPSEEK_BASE_URL
+from dashboard import DEFAULT_GITHUB_MODEL, DEFAULT_DEEPSEEK_MODEL
 from fin_ai.core.providers import list_models
-from fin_ai.core.request import ModelRequest, RequestPayload
-from fin_ai.core.response import ResponseFactory, ResponseMetadata
-from fin_ai.core.tools import YAHOO_FINANCE_TOOLS, LITELLM_TOOL_FUNCTIONS
+from fin_ai.core.request import create_llm_client, RequestPayload, known_providers
+from fin_ai.core.response import ResponseFactory
+from fin_ai.core.tools import (
+    YAHOO_FINANCE_TOOLS,
+    execute_litellm_tool_call,
+    extract_tool_calls,
+    build_tool_aware_system_prompt,
+)
 
 
 st.set_page_config(page_title="LiteLLM Chat", layout="wide")
 st.title("LiteLLM Provider Chat")
-st.caption("Query either GitHub Models or local Ollama using fin_ai.core request/response wrappers.")
+st.caption("Query providers using fin_ai.core request/response wrappers.")
 
-provider_label_to_key = {
-    "GitHub Models": "github",
-    "Local Ollama": "ollama",
-    "DeepSeek API": "deepseek",
-}
-
-
-def _build_tool_aware_system_prompt(base_prompt: str | None) -> str:
-    tool_names = [
-        tool.get("function", {}).get("name", "")
-        for tool in YAHOO_FINANCE_TOOLS
-        if tool.get("type") == "function"
-    ]
-    tool_names = [name for name in tool_names if name]
-    available_tools = ", ".join(tool_names) if tool_names else "none"
-
-    tool_guidance = (
-        "You have access to function tools via YAHOO_FINANCE_TOOLS. "
-        f"Available tools: {available_tools}. "
-        "When the user asks for stock prices, company facts, dividends, financial statements, "
-        "or analyst recommendations, call the most appropriate tool instead of guessing. "
-        "Use the exact tool arguments required by the schema. "
-        "After tool output is returned, summarize clearly and reference the returned data."
-    )
-
-    base = (base_prompt or "").strip()
-    if tool_guidance in base:
-        return base
-    if not base:
-        return tool_guidance
-    return f"{base}\n\n{tool_guidance}"
-
-
-def _extract_tool_calls(message: object) -> list[dict]:
-    tool_calls = getattr(message, "tool_calls", None)
-    if not tool_calls:
-        return []
-
-    extracted: list[dict] = []
-    for tool_call in tool_calls:
-        if isinstance(tool_call, dict):
-            function_payload = tool_call.get("function", {})
-            name = function_payload.get("name")
-            arguments_text = function_payload.get("arguments", "{}")
-            call_id = tool_call.get("id")
-        else:
-            function_payload = getattr(tool_call, "function", None)
-            name = getattr(function_payload, "name", None)
-            arguments_text = getattr(function_payload, "arguments", "{}")
-            call_id = getattr(tool_call, "id", None)
-
-        try:
-            arguments = json.loads(arguments_text or "{}")
-        except json.JSONDecodeError:
-            arguments = {}
-
-        extracted.append(
-            {
-                "id": call_id or f"call_{len(extracted)}",
-                "name": name,
-                "arguments": arguments,
-                "arguments_text": arguments_text or "{}",
-            }
-        )
-
-    return extracted
-
-
-def _execute_tool(name: str | None, arguments: dict) -> dict:
-    if not name:
-        return {"error": "Missing tool name"}
-
-    tool_function = LITELLM_TOOL_FUNCTIONS.get(name)
-    if tool_function is None:
-        return {"error": f"Unsupported tool: {name}"}
-
-    try:
-        return tool_function(**arguments)
-    except TypeError as exc:
-        return {"error": f"Invalid arguments for {name}: {exc}"}
-    except Exception as exc:
-        return {"error": str(exc)}
+provider_label_to_key = {cfg.label: name for name, cfg in known_providers().items()}
 
 with st.sidebar:
     st.header("Settings")
@@ -126,88 +48,61 @@ with st.sidebar:
     )
     st.text_input("Proxy Port (optional)", value=os.getenv("PX_PROXY_PORT", ""), key="proxy_port_input")
 
-    # ---- Dynamic model listing based on selected provider ----
+    # ---- Dynamic params + model listing based on selected provider ----
+    _pcfg = known_providers().get(provider)
+
+    if "api_key" in (_pcfg.required_params if _pcfg else ()):
+        _default_val = {"github": os.getenv("GITHUB_TOKEN", ""), "deepseek": os.getenv("DEEPSEEK_TOKEN", "")}.get(provider, "")
+        st.text_input("API Key / Token", value=_default_val, type="password", key=f"{provider}_api_key")
+
+    if _pcfg and _pcfg.optional_params:
+        _default_endpoint = {"ollama": os.getenv("OLLAMA_ENDPOINT", _pcfg.default_base_url),
+                             "github": os.getenv("GITHUB_ENDPOINT", _pcfg.default_base_url),
+                             "proxied_github": os.getenv("GITHUB_ENDPOINT", _pcfg.default_base_url),
+                             "deepseek": os.getenv("DEEPSEEK_BASE_URL", _pcfg.default_base_url),
+                             "proxied_deepseek": os.getenv("DEEPSEEK_BASE_URL", _pcfg.default_base_url)}.get(provider, _pcfg.default_base_url)
+        st.text_input("API Base URL", value=_default_endpoint, key=f"{provider}_api_base")
+
+    # --- Model selection ---
     if provider == "github":
-        github_token = st.text_input(
-            "GitHub Token",
-            value=os.getenv("GITHUB_TOKEN", ""),
-            type="password",
-            key="github_token",
-        )
+        _token_for_list = st.session_state.get("github_api_key", os.getenv("GITHUB_TOKEN", ""))
         with st.spinner("Fetching available GitHub models..."):
-            gh_models = list_models("github", api_key=github_token)
+            gh_models = list_models("github", api_key=_token_for_list)
         gh_model_ids = [m.id for m in gh_models]
         if gh_model_ids:
             default_gh = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
             default_gh_idx = gh_model_ids.index(default_gh) if default_gh in gh_model_ids else 0
-            st.selectbox(
-                "GitHub Model",
-                gh_model_ids,
-                index=default_gh_idx,
-                key="github_model",
-            )
+            st.selectbox("Model", gh_model_ids, index=default_gh_idx, key="github_model")
         else:
-            st.text_input(
-                "GitHub Model",
-                value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL),
-                key="github_model",
-            )
+            st.text_input("Model", value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL), key="github_model")
             st.caption("No models found. Check your token or enter a model name manually.")
-        st.text_input(
-            "GitHub Endpoint",
-            value=os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference"),
-            key="github_endpoint",
-        )
+    elif provider == "proxied_github":
+        st.text_input("Model", value=os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL), key="proxied_github_model")
     elif provider == "deepseek":
-        deepseek_token = os.getenv("DEEPSEEK_TOKEN", "")
+        _ds_token = os.getenv("DEEPSEEK_TOKEN", "")
         with st.spinner("Fetching available DeepSeek models..."):
-            ds_models = list_models("deepseek", api_key=deepseek_token)
+            ds_models = list_models("deepseek", api_key=_ds_token)
         ds_model_ids = [m.id for m in ds_models]
         if ds_model_ids:
             default_ds = os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
             default_ds_idx = ds_model_ids.index(default_ds) if default_ds in ds_model_ids else 0
-            st.selectbox(
-                "DeepSeek Model",
-                ds_model_ids,
-                index=default_ds_idx,
-                key="deepseek_model",
-            )
+            st.selectbox("Model", ds_model_ids, index=default_ds_idx, key="deepseek_model")
         else:
-            st.text_input(
-                "DeepSeek Model",
-                value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL),
-                key="deepseek_model",
-            )
+            st.text_input("Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="deepseek_model")
             st.caption("No models found. Check your token or enter a model name manually.")
-        st.text_input(
-            "DeepSeek Base URL",
-            value=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
-            key="deepseek_base_url",
-        )
-    else:
-        ollama_endpoint = st.text_input(
-            "Ollama Endpoint",
-            value=os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434"),
-            key="ollama_endpoint",
-        )
+    elif provider == "proxied_deepseek":
+        st.text_input("Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="proxied_deepseek_model")
+    else:  # ollama
+        _ol_endpoint = st.session_state.get("ollama_api_base", os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434"))
         with st.spinner("Fetching available Ollama models..."):
-            ol_models = list_models("ollama", base_url=ollama_endpoint)
+            ol_models = list_models("ollama", base_url=_ol_endpoint)
         ol_model_ids = [m.id for m in ol_models]
         if ol_model_ids:
             default_ol = os.getenv("OLLAMA_MODEL", "llama3.1")
             default_ol_idx = ol_model_ids.index(default_ol) if default_ol in ol_model_ids else 0
-            st.selectbox(
-                "Ollama Model",
-                ol_model_ids,
-                index=default_ol_idx,
-                key="ollama_model",
-            )
+            st.selectbox("Model", ol_model_ids, index=default_ol_idx, key="ollama_model")
         else:
-            st.text_input(
-                "Ollama Model",
-                value=os.getenv("OLLAMA_MODEL", "llama3.1"),
-                key="ollama_model",
-            )
+            st.text_input("Model", value=os.getenv("OLLAMA_MODEL", "llama3.1"), key="ollama_model")
             st.caption("No models found. Is Ollama running?")
 
 system_prompt = st.text_area(
@@ -221,7 +116,7 @@ user_prompt = st.text_area(
     height=140,
 )
 
-effective_system_prompt = _build_tool_aware_system_prompt(system_prompt)
+effective_system_prompt = build_tool_aware_system_prompt(system_prompt)
 with st.expander("Effective System Prompt (with tool guidance)", expanded=False):
     st.code(effective_system_prompt)
 
@@ -229,17 +124,12 @@ if st.button("Send", type="primary"):
     if not user_prompt.strip():
         st.error("User Prompt cannot be empty.")
     else:
+        # Build client params from session state
+        _api_key = None
         if provider == "github":
-            os.environ["GITHUB_MODEL"] = st.session_state["github_model"]
-            os.environ["GITHUB_ENDPOINT"] = st.session_state["github_endpoint"]
-            os.environ["GITHUB_TOKEN"] = st.session_state["github_token"]
+            _api_key = st.session_state.get("github_token", "") or None
         elif provider == "deepseek":
-            os.environ["DEEPSEEK_MODEL"] = st.session_state["deepseek_model"]
-            os.environ["DEEPSEEK_BASE_URL"] = st.session_state["deepseek_base_url"]
-            os.environ["DEEPSEEK_TOKEN"] = deepseek_token
-        else:
-            os.environ["OLLAMA_MODEL"] = st.session_state["ollama_model"]
-            os.environ["OLLAMA_ENDPOINT"] = st.session_state["ollama_endpoint"]
+            _api_key = os.getenv("DEEPSEEK_TOKEN", "") or None
 
         raw_proxy_port = st.session_state.get("proxy_port_input", "").strip()
         proxy_port = None
@@ -261,12 +151,16 @@ if st.button("Send", type="primary"):
         )
 
         try:
-            requester = ModelRequest(provider=provider, format=response_format)
-            response = requester.request(payload)
+            client = create_llm_client(
+                provider=provider,
+                api_key=_api_key,
+                proxy_port=proxy_port,
+            )
+            response = client.send(payload, response_class=ResponseFactory.get(response_format))
 
             first_raw = response.get_metadata().raw_response
             first_message = first_raw.choices[0].message
-            tool_calls = _extract_tool_calls(first_message)
+            tool_calls = extract_tool_calls(first_message)
 
             if tool_calls:
                 follow_up_messages = []
@@ -292,7 +186,7 @@ if st.button("Send", type="primary"):
                 )
 
                 for tool_call in tool_calls:
-                    tool_result = _execute_tool(tool_call["name"], tool_call["arguments"])
+                    tool_result = execute_litellm_tool_call(tool_call["name"], tool_call["arguments"])
                     follow_up_messages.append(
                         {
                             "role": "tool",
@@ -312,9 +206,9 @@ if st.button("Send", type="primary"):
                     tools=YAHOO_FINANCE_TOOLS,
                     messages=follow_up_messages,
                 )
-                response = requester.client.send(
+                response = client.send(
                     follow_up_payload,
-                    response_class=requester.response_class,
+                    response_class=ResponseFactory.get(response_format),
                 )
         except Exception as exc:
             st.exception(exc)
@@ -334,7 +228,8 @@ if st.button("Send", type="primary"):
                     f" ({before} -> {after} tokens before sending)."
                 )
 
-            metadata_dict = asdict(metadata)
+            from dataclasses import asdict as _asdict
+            metadata_dict = _asdict(metadata)
             metadata_dict.pop("raw_response", None)
 
             st.subheader("Metadata")

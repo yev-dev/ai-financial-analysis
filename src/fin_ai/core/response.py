@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Literal, Type
 
-Provider = Literal["ollama", "github"]
+Provider = Literal["ollama", "github", "deepseek", "proxied_github", "proxied_deepseek"]
 
 
 @dataclass(slots=True)

@@ -1,4 +1,5 @@
 
+import json
 import yfinance as yf
 from typing import Any, Optional
 import pandas as pd
@@ -593,4 +594,68 @@ def execute_litellm_tool_call(name: str, arguments: dict[str, Any]) -> dict:
         return {"error": f"Invalid arguments for {name}: {exc}"}
     except Exception as exc:
         return {"error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Shared utilities (extracted to avoid duplication across modules)
+# ---------------------------------------------------------------------------
+
+
+def extract_tool_calls(message: object) -> list[dict]:
+    """Extract tool call details from an LLM response message.
+
+    Handles both dict-style and object-style ``tool_calls`` attributes.
+
+    Returns a list of ``{"id", "name", "arguments", "arguments_text"}`` dicts.
+    """
+    tool_calls = getattr(message, "tool_calls", None)
+    if not tool_calls:
+        return []
+
+    extracted: list[dict] = []
+    for tc in tool_calls:
+        if isinstance(tc, dict):
+            fn = tc.get("function", {})
+            name = fn.get("name")
+            args_text = fn.get("arguments", "{}")
+            call_id = tc.get("id")
+        else:
+            fn = getattr(tc, "function", None)
+            name = getattr(fn, "name", None)
+            args_text = getattr(fn, "arguments", "{}")
+            call_id = getattr(tc, "id", None)
+        try:
+            arguments = json.loads(args_text or "{}")
+        except json.JSONDecodeError:
+            arguments = {}
+        extracted.append({
+            "id": call_id or f"call_{len(extracted)}",
+            "name": name,
+            "arguments": arguments,
+            "arguments_text": args_text or "{}",
+        })
+    return extracted
+
+
+def build_tool_aware_system_prompt(base_prompt: str | None = None) -> str:
+    """Augment a system prompt with tool-awareness instructions."""
+    tool_names = [
+        tool.get("function", {}).get("name", "")
+        for tool in YAHOO_FINANCE_TOOLS
+        if tool.get("type") == "function"
+    ]
+    tool_names = [name for name in tool_names if name]
+    available = ", ".join(tool_names) if tool_names else "none"
+    guidance = (
+        "You have access to function tools. "
+        f"Available: {available}. "
+        "When asked for stock data, financials, or analyst recs, call the "
+        "appropriate tool instead of guessing."
+    )
+    base = (base_prompt or "").strip()
+    if guidance in base:
+        return base
+    if not base:
+        return guidance
+    return f"{base}\n\n{guidance}"
 

@@ -52,26 +52,25 @@ from dashboard import (
 from dashboard.utils import (
     execute_python_code,
     extract_python_code,
-    get_embeddings,
     render_pdf_pages,
     render_csv_thumbnail,
     sanitize_generated_python_code,
 )
+from fin_ai.core.embeddings import create_embeddings
 from fin_ai.core.processor import (
     SUPPORTED_UPLOAD_TYPES,
     answer_question,
     build_query_source_configs,
     clear_history,
     fetch_models,
-    find_source_document,
+    # find_source_document,
     get_source_vector_stores,
     get_vector_db_names,
     load_history,
     load_vector_stores_for_query,
     process_uploaded_document,
     purge_vector_db,
-    resolve_chat_provider_env,
-    resolve_embedding_provider_env,
+    # resolve_chat_provider_env,
     save_history_entry,
     build_agent_llm_config,
     run_agent_task,
@@ -79,6 +78,7 @@ from fin_ai.core.processor import (
 from fin_ai.core.providers import list_models
 from fin_ai.core.query import format_source_citations
 from fin_ai.core.rag import load_embedding_metadata
+from fin_ai.core.request import known_providers, get_provider_config
 
 # Agent library for sidebar listing
 from fin_ai.agents.agent_library import library as agent_library
@@ -267,11 +267,9 @@ if vector_db_names:
         "financial data tools."
     )
 
-    provider_label_to_key = {
-        "Local Ollama": "ollama",
-        "GitHub Models": "github",
-        "DeepSeek Models": "deepseek",
-    }
+    # Build provider label→key mapping from ProviderConfig
+    _all_cfgs = known_providers()
+    provider_label_to_key = {cfg.label: name for name, cfg in _all_cfgs.items()}
     default_provider = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
     provider_labels = list(provider_label_to_key.keys())
     default_provider_index = next(
@@ -279,14 +277,51 @@ if vector_db_names:
     )
     selected_provider_label = st.sidebar.selectbox("Select Provider", provider_labels, index=default_provider_index, key="chat_provider")
     selected_provider = provider_label_to_key[selected_provider_label]
+    _pcfg = get_provider_config(selected_provider)
+
     # Initialise provider-scoped vars with safe defaults
     github_token = os.getenv("GITHUB_TOKEN", "")
     github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
     deepseek_token = os.getenv("DEEPSEEK_TOKEN", "")
     deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL)
+    http_proxy_port: int | None = None
+    https_proxy_port: int | None = None
 
+    # --- Show required / optional params based on ProviderConfig ---
+    if "api_key" in _pcfg.required_params or "api_key" in _pcfg.optional_params:
+        _is_required = "api_key" in _pcfg.required_params
+        _label = "API Key / Token" + (" *" if _is_required else "")
+        _default_val = {"github": os.getenv("GITHUB_TOKEN", ""), "deepseek": os.getenv("DEEPSEEK_TOKEN", "")}.get(selected_provider, "")
+        _value = st.sidebar.text_input(_label, value=_default_val, type="password", key=f"{selected_provider}_api_key")
+        if selected_provider == "github":
+            github_token = _value
+        elif selected_provider == "deepseek":
+            deepseek_token = _value
+
+    if "api_base" in _pcfg.optional_params:
+        _default_base = _pcfg.default_base_url
+        _current_base = os.getenv("GITHUB_ENDPOINT" if "github" in selected_provider else "DEEPSEEK_BASE_URL", _default_base) if selected_provider != "ollama" else os.getenv("OLLAMA_ENDPOINT", _default_base)
+        _base_val = st.sidebar.text_input("API Base URL", value=_current_base, key=f"{selected_provider}_api_base")
+        if selected_provider == "github" or selected_provider == "proxied_github":
+            github_endpoint = _base_val
+        elif selected_provider == "deepseek" or selected_provider == "proxied_deepseek":
+            deepseek_base_url = _base_val
+
+    # Proxy ports: single-port mode (proxy_port) or split-port mode (http_proxy_port, https_proxy_port)
+    _show_proxy = "proxy_port" in _pcfg.optional_params or "http_proxy_port" in _pcfg.optional_params
+    if _show_proxy:
+        with st.sidebar.expander("Proxy Settings", expanded=False):
+            if "proxy_port" in _pcfg.optional_params:
+                _default_proxy = os.getenv("PX_PROXY_PORT", "")
+                proxy_port_val = st.text_input("Proxy Port", value=_default_proxy, key=f"{selected_provider}_proxy_port")
+            if "http_proxy_port" in _pcfg.optional_params or "https_proxy_port" in _pcfg.optional_params:
+                _default_http = os.getenv("PX_HTTP_PROXY_PORT", "")
+                _default_https = os.getenv("PX_HTTPS_PROXY_PORT", "")
+                http_proxy_port_val = st.text_input("HTTP Proxy Port", value=_default_http, key=f"{selected_provider}_http_proxy_port")
+                https_proxy_port_val = st.text_input("HTTPS Proxy Port", value=_default_https, key=f"{selected_provider}_https_proxy_port")
+
+    # --- Model selection ---
     if selected_provider == "github":
-        github_token = st.sidebar.text_input("GitHub Token", value=os.getenv("GITHUB_TOKEN", ""), type="password", key="github_token_input")
         try:
             with st.spinner("Fetching available GitHub models..."):
                 gh_models = fetch_models("github", api_key=github_token)
@@ -295,11 +330,13 @@ if vector_db_names:
             display_model_options = [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
         default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
         default_chat_index = display_model_options.index(default_chat_model) if default_chat_model in display_model_options else 0
-        selected_model = st.sidebar.selectbox("Select GitHub Model", display_model_options, index=default_chat_index, key="github_model")
-        github_endpoint = st.sidebar.text_input("GitHub Endpoint", value=github_endpoint, key="github_endpoint_input")
+        selected_model = st.sidebar.selectbox("Select Model", display_model_options, index=default_chat_index, key="github_model")
+    elif selected_provider == "proxied_github":
+        display_model_options = [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
+        default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
+        selected_model = st.sidebar.text_input("Model", value=default_chat_model, key="proxied_github_model")
 
     elif selected_provider == "deepseek":
-        deepseek_token = os.getenv("DEEPSEEK_TOKEN", "")
         try:
             with st.spinner("Fetching available DeepSeek models..."):
                 ds_models = fetch_models("deepseek", api_key=deepseek_token)
@@ -309,18 +346,20 @@ if vector_db_names:
         if deepseek_model_ids:
             default_ds = os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
             default_ds_idx = deepseek_model_ids.index(default_ds) if default_ds in deepseek_model_ids else 0
-            selected_model = st.sidebar.selectbox("Select DeepSeek Model", deepseek_model_ids, index=default_ds_idx, key="deepseek_model")
+            selected_model = st.sidebar.selectbox("Select Model", deepseek_model_ids, index=default_ds_idx, key="deepseek_model")
         else:
-            selected_model = st.sidebar.text_input("DeepSeek Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="deepseek_model_fallback")
-        deepseek_base_url = st.sidebar.text_input("DeepSeek Base URL", value=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL), key="deepseek_base_url_input")
+            selected_model = st.sidebar.text_input("Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="deepseek_model_fallback")
 
-    else:
+    elif selected_provider == "proxied_deepseek":
+        selected_model = st.sidebar.text_input("Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="proxied_deepseek_model")
+
+    else:  # ollama
         default_chat_model = os.getenv("OLLAMA_MODEL", DEFAULT_CHAT_MODEL)
         try:
             default_chat_index = available_chat_models.index(default_chat_model) if default_chat_model in available_chat_models else 0
         except ValueError:
             default_chat_index = 0
-        selected_model = st.sidebar.selectbox("Ollama Chat Model", available_chat_models, index=default_chat_index, key="ollama_chat_model")
+        selected_model = st.sidebar.selectbox("Model", available_chat_models, index=default_chat_index, key="ollama_chat_model")
 
     response_type = st.sidebar.selectbox("Select Response Type", ["Plain Text", "Markdown", "Python Code"], index=1, key="response_type")
     auto_truncate_prompt = st.sidebar.checkbox("Auto-truncate prompt (gpt-5 guard)", value=True)
@@ -511,18 +550,18 @@ if vector_db_names:
             actual_emb_provider = saved_emb_meta["provider"]
             actual_emb_model = saved_emb_meta["model"]
             actual_emb_base_url = saved_emb_meta["base_url"]
-            embeddings = get_embeddings(
-                actual_emb_model,
-                actual_emb_base_url,
+            embeddings = create_embeddings(
                 provider=actual_emb_provider,
-                github_token=_github_token if actual_emb_provider == "github" else None,
+                model=actual_emb_model,
+                api_base=actual_emb_base_url,
+                api_key=_github_token if actual_emb_provider == "github" else None,
             )
         else:
-            embeddings = get_embeddings(
-                selected_embedding_model,
-                embeddings_base_url,
+            embeddings = create_embeddings(
                 provider=selected_emb_provider,
-                github_token=_github_token if selected_emb_provider == "github" else None,
+                model=selected_embedding_model,
+                api_base=embeddings_base_url,
+                api_key=_github_token if selected_emb_provider == "github" else None,
             )
     except Exception as e:
         st.sidebar.error(f"Embeddings error: {e}")
@@ -610,10 +649,10 @@ if vector_db_names:
                 with st.spinner("Answering your question..."):
                     resolve_chat_provider_env(
                         selected_provider,
-                        github_token=github_token if selected_provider == "github" else "",
-                        deepseek_token=deepseek_token if selected_provider == "deepseek" else "",
-                        deepseek_base_url=deepseek_base_url if selected_provider == "deepseek" else "",
-                        github_endpoint=github_endpoint,
+                        github_token=github_token if selected_provider in ("github",) else "",
+                        deepseek_token=deepseek_token if selected_provider in ("deepseek",) else "",
+                        deepseek_base_url=deepseek_base_url if selected_provider in ("deepseek", "proxied_deepseek") else "",
+                        github_endpoint=github_endpoint if selected_provider in ("github", "proxied_github") else "",
                         selected_model=selected_model,
                     )
                     result = answer_question(
@@ -662,14 +701,17 @@ if vector_db_names:
 
 if agent_submit and agent_rag_query.strip():
     with st.spinner(f"Running {selected_agent} agent..."):
+        # For proxied providers, don't pass token (proxy handles auth)
+        _effective_gh_token = github_token if selected_provider == "github" else ""
+        _effective_ds_token = deepseek_token if selected_provider == "deepseek" else ""
         agent_llm_config = build_agent_llm_config(
             provider=selected_provider,
             model=selected_model,
             ollama_base_url=OLLAMA_BASE_URL,
             github_endpoint=github_endpoint,
-            github_token=github_token,
+            github_token=_effective_gh_token,
             deepseek_base_url=deepseek_base_url,
-            deepseek_token=deepseek_token,
+            deepseek_token=_effective_ds_token,
         )
         result = run_agent_task(
             agent_name=selected_agent,

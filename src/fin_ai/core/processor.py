@@ -21,12 +21,17 @@ from langchain_community.vectorstores import FAISS
 
 import openai
 
-from fin_ai.core.request import ModelRequest, RequestPayload
+from fin_ai.core.request import (
+    ModelRequest,
+    RequestPayload,
+    get_provider_config,
+)
 from fin_ai.core.query import (
     SourceRetrieverConfig,
     query_with_multi_source_prompting,
     build_source_retriever_configs,
 )
+from fin_ai.core.embeddings import create_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +45,14 @@ from fin_ai.core.rag import (
     _create_source_metadata,
 )
 from fin_ai.core.providers import list_models, ModelInfo
-from fin_ai.core.tools import YAHOO_FINANCE_TOOLS, execute_litellm_tool_call
+from fin_ai.core.tools import (
+    YAHOO_FINANCE_TOOLS,
+    execute_litellm_tool_call,
+    extract_tool_calls,
+    build_tool_aware_system_prompt,
+)
 from dashboard.utils import (
     append_question_history,
-    get_embeddings,
     load_question_history,
     purge_vector_db_assets,
 )
@@ -63,41 +72,8 @@ from fin_ai.config.fin_ai import (
 
 
 # ---------------------------------------------------------------------------
-# Configuration / environment
+# Model listing
 # ---------------------------------------------------------------------------
-
-
-def resolve_chat_provider_env(
-    provider: str,
-    *,
-    github_token: str = "",
-    deepseek_token: str = "",
-    deepseek_base_url: str = "",
-    github_endpoint: str = "",
-    selected_model: str = "",
-) -> None:
-    """Set environment variables required by the chat provider's client builder."""
-    if provider == "github":
-        os.environ["GITHUB_TOKEN"] = github_token
-        os.environ["GITHUB_MODEL"] = selected_model
-        os.environ["GITHUB_ENDPOINT"] = github_endpoint
-    elif provider == "deepseek":
-        os.environ["DEEPSEEK_TOKEN"] = deepseek_token
-        os.environ["DEEPSEEK_MODEL"] = selected_model
-        os.environ["DEEPSEEK_BASE_URL"] = deepseek_base_url
-    else:
-        os.environ["OLLAMA_MODEL"] = selected_model
-        os.environ["OLLAMA_ENDPOINT"] = OLLAMA_BASE_URL
-
-
-def resolve_embedding_provider_env(
-    emb_provider: str,
-    *,
-    github_token: str = "",
-) -> None:
-    """Set environment variables required by the embedding provider."""
-    if emb_provider == "github":
-        os.environ["GITHUB_TOKEN"] = github_token
 
 
 def fetch_models(
@@ -171,11 +147,11 @@ def process_uploaded_document(
     document_metadata["file_size"] = len(file_binary)
     chunks = get_markdown_splits(markdown_content, metadata=document_metadata)
 
-    embeddings = get_embeddings(
-        embedding_model,
-        embedding_base_url,
+    embeddings = create_embeddings(
         provider=emb_provider,
-        github_token=github_token if emb_provider == "github" else None,
+        model=embedding_model,
+        api_base=embedding_base_url,
+        api_key=github_token if emb_provider == "github" else None,
     )
     vector_store = create_or_load_vector_store(base_name, chunks, embeddings)
     save_embedding_metadata(base_name, provider=emb_provider, model=embedding_model, base_url=embedding_base_url)
@@ -271,7 +247,7 @@ def answer_question(
     """Run a RAG query against the selected vector stores."""
     start_time = perf_counter()
 
-    effective_system = _build_tool_aware_system_prompt(system_prompt) if use_tools else system_prompt
+    effective_system = build_tool_aware_system_prompt(system_prompt) if use_tools else system_prompt
 
     llm_result = query_with_multi_source_prompting(
         question,
@@ -289,7 +265,7 @@ def answer_question(
 
     if use_tools and llm_response is not None:
         first_message = llm_response.get_metadata().raw_response.choices[0].message
-        tool_calls = _extract_tool_calls(first_message)
+        tool_calls = extract_tool_calls(first_message)
         if tool_calls:
             follow_up_messages = _build_tool_follow_up(effective_system, llm_result.prompt, first_message, tool_calls)
             follow_up_payload = RequestPayload(
@@ -334,10 +310,13 @@ def build_agent_llm_config(
     Parameters
     ----------
     provider : str
-        ``"ollama"``, ``"github"``, or ``"deepseek"``.
+        ``"ollama"``, ``"github"``, ``"deepseek"``, ``"proxied_github"``,
+        or ``"proxied_deepseek"``.
     model : str
         Model identifier (e.g. ``"llama3.1"``, ``"openai/gpt-4o"``).
     """
+    cfg = get_provider_config(provider)
+
     if provider == "github":
         return {
             "config_list": [
@@ -346,7 +325,15 @@ def build_agent_llm_config(
             "temperature": 0,
             "timeout": 120,
         }
-    elif provider == "deepseek":
+    elif provider == "proxied_github":
+        return {
+            "config_list": [
+                {"model": model, "base_url": github_endpoint, "api_key": ""}
+            ],
+            "temperature": 0,
+            "timeout": 120,
+        }
+    elif provider in ("deepseek", "proxied_deepseek"):
         return {
             "config_list": [
                 {"model": model, "base_url": deepseek_base_url, "api_key": deepseek_token}
@@ -413,13 +400,19 @@ def run_agent_task(
     from fin_ai.agents import SingleAssistantRAG, SingleAssistant, init_engine
     from fin_ai.agents.engine_bridge import publish_research_report
 
+    _github_token_for_bridge = (
+        os.environ.get("GITHUB_TOKEN") or ""
+        if chat_provider in ("github",)
+        else None
+    )
+
     # Initialise the engine bridge for local RAG
     init_engine(
         chat_provider=chat_provider,
         embedding_model=embedding_model or None,
         embedding_provider=embedding_provider or None,
         embedding_base_url=embedding_base_url or None,
-        github_token=os.environ.get("GITHUB_TOKEN") or None,
+        github_token=_github_token_for_bridge,
     )
 
     _retrieve_config = {
@@ -544,54 +537,7 @@ def purge_vector_db(vector_db_name: str) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 
-def _build_tool_aware_system_prompt(base_prompt: str | None) -> str:
-    tool_names = [
-        tool.get("function", {}).get("name", "")
-        for tool in YAHOO_FINANCE_TOOLS
-        if tool.get("type") == "function"
-    ]
-    tool_names = [name for name in tool_names if name]
-    available = ", ".join(tool_names) if tool_names else "none"
-    guidance = (
-        f"You have access to function tools. Available: {available}. "
-        "When asked for stock data, financials, or analyst recs, call the "
-        "appropriate tool instead of guessing."
-    )
-    base = (base_prompt or "").strip()
-    if guidance in base:
-        return base
-    if not base:
-        return guidance
-    return f"{base}\n\n{guidance}"
 
-
-def _extract_tool_calls(message: object) -> list[dict]:
-    tool_calls = getattr(message, "tool_calls", None)
-    if not tool_calls:
-        return []
-    extracted: list[dict] = []
-    for tc in tool_calls:
-        if isinstance(tc, dict):
-            fn = tc.get("function", {})
-            name = fn.get("name")
-            args_text = fn.get("arguments", "{}")
-            call_id = tc.get("id")
-        else:
-            fn = getattr(tc, "function", None)
-            name = getattr(fn, "name", None)
-            args_text = getattr(fn, "arguments", "{}")
-            call_id = getattr(tc, "id", None)
-        try:
-            arguments = json.loads(args_text or "{}")
-        except json.JSONDecodeError:
-            arguments = {}
-        extracted.append({
-            "id": call_id or f"call_{len(extracted)}",
-            "name": name,
-            "arguments": arguments,
-            "arguments_text": args_text or "{}",
-        })
-    return extracted
 
 
 def _build_tool_follow_up(
