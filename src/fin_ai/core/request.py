@@ -1,8 +1,39 @@
+"""
+LLM request handling — provider configs, LiteLLM client, and factory.
+
+Every provider has a ``ProviderConfig`` that declares:
+- Required parameters (raised on missing)
+- Optional parameters (used when provided)
+- How to construct the LiteLLM model string and ``api_base`` URL
+
+The factory :func:`create_llm_client` builds a ready-to-use :class:`LiteLLMClient`
+from a provider name and explicit keyword arguments — no implicit env-var
+reading outside of sensible defaults.
+
+Usage::
+
+    from fin_ai.core.request import create_llm_client, ProviderConfig, known_providers
+
+    # Build a client for any provider with explicit params
+    client = create_llm_client(
+        provider="ollama",
+        model="llama3.1",
+        api_base="http://localhost:11434",
+    )
+    # Proxied GitHub — only needs proxy ports, no token
+    client = create_llm_client(
+        provider="proxied_github",
+        model="openai/gpt-4o",
+        http_proxy_port=8080,
+        https_proxy_port=8443,
+    )
+"""
+
 from __future__ import annotations
 
 import os
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextlib import contextmanager
 from typing import Any, Type
 
@@ -23,14 +54,126 @@ MODEL_SAFE_INPUT_BUDGETS = {
     "gpt-4.1-mini": 7200,
 }
 
+# ---------------------------------------------------------------------------
+# Provider configuration — declares what each provider needs
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    """Declares the params a provider requires and how to build LiteLLM arguments.
+
+    Each registered provider has one instance that documents its interface.
+    """
+
+    #: Human-readable label (shown in UI dropdowns etc.)
+    label: str
+
+    #: Parameter names that the caller MUST provide.
+    required_params: tuple[str, ...] = ()
+
+    #: Parameter names that the caller MAY provide (e.g. token, proxy port).
+    optional_params: tuple[str, ...] = ()
+
+    #: Default ``api_base`` URL (used when none is supplied).
+    default_base_url: str = ""
+
+    #: How to construct the LiteLLM model string given the ``model`` kwarg.
+    #: ``"direct"`` = use the model string as-is; ``"ollama/{model}"`` = prepend prefix.
+    model_format: str = "direct"  # "direct" | "ollama/{model}" | "deepseek/{model}"
+
+    def build_model_string(self, model: str) -> str:
+        if self.model_format == "direct":
+            return model
+        return self.model_format.format(model=model)
+
+    def build_api_base(self, api_base: str | None) -> str:
+        return api_base or self.default_base_url
+
+
+# ---------------------------------------------------------------------------
+# Provider registry
+# ---------------------------------------------------------------------------
+
+_PROVIDER_CONFIGS: dict[str, ProviderConfig] = {
+    "ollama": ProviderConfig(
+        label="Local Ollama",
+        optional_params=("api_base", "proxy_port"),
+        default_base_url="http://localhost:11434",
+        model_format="ollama/{model}",
+    ),
+    "github": ProviderConfig(
+        label="GitHub Models",
+        required_params=("api_key",),
+        optional_params=("api_base", "proxy_port"),
+        default_base_url="https://models.github.ai/inference",
+        model_format="direct",
+    ),
+    "deepseek": ProviderConfig(
+        label="DeepSeek Models",
+        required_params=("api_key",),
+        optional_params=("api_base", "proxy_port"),
+        default_base_url="https://api.deepseek.com/v1",
+        model_format="deepseek/{model}",
+    ),
+    "proxied_github": ProviderConfig(
+        label="GitHub Models (Proxy)",
+        required_params=(),
+        optional_params=("api_base", "http_proxy_port", "https_proxy_port"),
+        default_base_url="https://models.github.ai/inference",
+        model_format="direct",
+    ),
+    "proxied_deepseek": ProviderConfig(
+        label="DeepSeek Models (Proxy)",
+        required_params=(),
+        optional_params=("api_base", "http_proxy_port", "https_proxy_port"),
+        default_base_url="https://api.deepseek.com/v1",
+        model_format="deepseek/{model}",
+    ),
+}
+
+
+def get_provider_config(provider: str) -> ProviderConfig:
+    """Return the :class:`ProviderConfig` for *provider*, or raise ``ValueError``."""
+    try:
+        return _PROVIDER_CONFIGS[provider]
+    except KeyError:
+        available = ", ".join(sorted(_PROVIDER_CONFIGS))
+        raise ValueError(f"Unknown provider {provider!r}. Available: {available}.")
+
+
+def known_providers() -> dict[str, ProviderConfig]:
+    """Return a copy of the provider config registry."""
+    return dict(_PROVIDER_CONFIGS)
+
+
+def register_provider_config(provider: str, config: ProviderConfig) -> None:
+    """Register (or override) a provider config."""
+    _PROVIDER_CONFIGS[provider] = config
+
+
+# ---------------------------------------------------------------------------
+# Model name resolution (kept for backward compat, delegates to config)
+# ---------------------------------------------------------------------------
+
 
 def resolve_model_name(provider: Provider) -> str:
+    """Resolve the LiteLLM model string for *provider*.
+
+    Uses legacy env-var fallbacks for backward compatibility. Prefer using
+    :func:`create_llm_client` with an explicit ``model`` argument.
+    """
+    cfg = get_provider_config(provider)
     if provider == "ollama":
-        return f"ollama/{os.getenv('OLLAMA_MODEL', 'llama3.1')}"
+        return cfg.build_model_string(os.getenv("OLLAMA_MODEL", "llama3.1"))
     if provider == "github":
         return os.getenv("GITHUB_MODEL", "openai/gpt-4o")
     if provider == "deepseek":
-        return f"deepseek/{os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')}"
+        return cfg.build_model_string(os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
+    if provider.startswith("proxied_"):
+        base = provider.removeprefix("proxied_")
+        env_key = f"{base.upper()}_MODEL"
+        return os.getenv(env_key, "openai/gpt-4o" if "github" in provider else "deepseek-chat")
     raise ValueError(f"Unknown provider {provider!r}.")
 
 
@@ -95,6 +238,8 @@ class RequestPayload:
     temperature: float = 0.2
     max_tokens: int | None = None
     proxy_port: int | None = None
+    http_proxy_port: int | None = None
+    https_proxy_port: int | None = None
     auto_truncate_prompt: bool = True
     tools: list[dict[str, Any]] | None = None
     messages: list[dict[str, Any]] | None = None
@@ -109,7 +254,11 @@ class PromptGuardResult:
 
 
 class LiteLLMClient:
-    """Low-level wrapper over LiteLLM completion calls."""
+    """Low-level wrapper over LiteLLM completion calls.
+
+    All provider configuration is baked in at construction time via
+    :func:`create_llm_client`.  Callers only need to call :meth:`send`.
+    """
 
     def __init__(
         self,
@@ -119,27 +268,62 @@ class LiteLLMClient:
         api_key: str | None = None,
         proxy_host: str | None = None,
         proxy_port: int | None = None,
+        http_proxy_port: int | None = None,
+        https_proxy_port: int | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
         self.api_base = api_base
         self.api_key = api_key
-        self.proxy_host = proxy_host or os.getenv("PX_PROXY_HOST", "127.0.0.1")
+        self.proxy_host = proxy_host or "127.0.0.1"
         self.proxy_port = proxy_port
+        self.http_proxy_port = http_proxy_port
+        self.https_proxy_port = https_proxy_port
 
     @contextmanager
-    def _proxy_env(self, proxy_port: int | None):
-        """Temporarily set proxy env vars for LiteLLM HTTP calls. Useful for per-request proxy configuration within a corporate network."""
-        if not proxy_port:
+    def _proxy_env(self, payload: RequestPayload):
+        """Temporarily set proxy env vars for LiteLLM HTTP calls.
+
+        Supports two modes:
+        1. Single-port mode (``proxy_port``) — sets both HTTP_PROXY and HTTPS_PROXY.
+        2. Split-port mode (``http_proxy_port`` + ``https_proxy_port``) — separate
+           ports for HTTP and HTTPS proxies (used by ``proxied_github`` etc.).
+        """
+        http_port = (
+            payload.http_proxy_port
+            if payload.http_proxy_port is not None
+            else self.http_proxy_port
+        )
+        https_port = (
+            payload.https_proxy_port
+            if payload.https_proxy_port is not None
+            else self.https_proxy_port
+        )
+        single_port = (
+            payload.proxy_port
+            if payload.proxy_port is not None
+            else self.proxy_port
+        )
+
+        if single_port is not None:
+            http_port = https_port = single_port
+
+        if http_port is None and https_port is None:
             yield
             return
 
-        proxy_url = f"http://{self.proxy_host}:{proxy_port}"
+        http_url = f"http://{self.proxy_host}:{http_port}" if http_port is not None else None
+        https_url = f"https://{self.proxy_host}:{https_port}" if https_port is not None else None
+
         keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
         previous = {key: os.environ.get(key) for key in keys}
 
-        for key in keys:
-            os.environ[key] = proxy_url
+        if http_url:
+            os.environ["HTTP_PROXY"] = http_url
+            os.environ["http_proxy"] = http_url
+        if https_url:
+            os.environ["HTTPS_PROXY"] = https_url
+            os.environ["https_proxy"] = https_url
 
         try:
             yield
@@ -188,8 +372,7 @@ class LiteLLMClient:
         if request.max_tokens is not None:
             call_args["max_tokens"] = request.max_tokens
 
-        effective_proxy_port = request.proxy_port if request.proxy_port is not None else self.proxy_port
-        with self._proxy_env(effective_proxy_port):
+        with self._proxy_env(request):
             raw = completion(**call_args)
         usage = getattr(raw, "usage", None)
         choice = raw.choices[0]
@@ -249,87 +432,181 @@ def _apply_model_input_guard(messages: list[dict[str, str]], model: str) -> Prom
 
 
 class ModelRequest:
-    """Consolidated wrapper for model requests across providers."""
+    """Consolidated wrapper for model requests across providers.
 
-    def __init__(self, provider: Provider, format: str = "console") -> None:
+    Builds a :class:`LiteLLMClient` via :func:`create_llm_client` from
+    a provider name and optional overrides.  Supports the legacy env-var
+    pattern for backward compatibility.
+    """
+
+    def __init__(
+        self,
+        provider: Provider,
+        format: str = "console",
+        *,
+        model: str | None = None,
+        api_base: str | None = None,
+        api_key: str | None = None,
+        proxy_port: int | None = None,
+        http_proxy_port: int | None = None,
+        https_proxy_port: int | None = None,
+    ) -> None:
         self.provider = provider
         self.response_class = ResponseFactory.get(format)
-        self.client = ModelRequestFactory.create(provider)
+        cfg = get_provider_config(provider)
+        resolved_model = model or resolve_model_name(provider)
+        resolved_api_base = cfg.build_api_base(api_base)
+        self.client = LiteLLMClient(
+            provider=provider,
+            model=resolved_model,
+            api_base=resolved_api_base,
+            api_key=api_key,
+            proxy_port=proxy_port,
+            http_proxy_port=http_proxy_port,
+            https_proxy_port=https_proxy_port,
+        )
 
     def request(self, payload: RequestPayload) -> ModelResponse:
         return self.client.send(payload, response_class=self.response_class)
 
 
-def _build_ollama_client() -> LiteLLMClient:
-    endpoint = _normalize_ollama_endpoint(os.getenv("OLLAMA_ENDPOINT", "http://localhost:11434"))
-    default_proxy_port = _read_proxy_port_from_env()
+# ---------------------------------------------------------------------------
+# create_llm_client — the primary factory function
+# ---------------------------------------------------------------------------
+
+
+def create_llm_client(
+    provider: str,
+    *,
+    model: str | None = None,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    proxy_port: int | None = None,
+    http_proxy_port: int | None = None,
+    https_proxy_port: int | None = None,
+) -> LiteLLMClient:
+    """Create a fully-configured :class:`LiteLLMClient` for *provider*.
+
+    All parameters are explicit — no env-var reading happens inside this
+    function except for sensible defaults (e.g. Ollama's ``localhost:11434``
+    as the default ``api_base``).
+
+    Parameters
+    ----------
+    provider : str
+        One of ``"ollama"``, ``"github"``, ``"deepseek"``,
+        ``"proxied_github"``, ``"proxied_deepseek"``.
+    model : str, optional
+        Model identifier.  Uses ``ProviderConfig.build_model_string()`` to
+        format it for LiteLLM (e.g. ``"ollama/llama3.1"`` for Ollama).
+    api_base : str, optional
+        API base URL.  Falls back to ``ProviderConfig.default_base_url``.
+    api_key : str, optional
+        API key / token.  Required for ``github`` and ``deepseek``.
+    proxy_port : int, optional
+        Single proxy port (applied to both HTTP and HTTPS).
+    http_proxy_port : int, optional
+        Separate HTTP proxy port (``proxied_*`` providers).
+    https_proxy_port : int, optional
+        Separate HTTPS proxy port (``proxied_*`` providers).
+
+    Returns
+    -------
+    LiteLLMClient
+        Ready-to-use client.
+
+    Raises
+    ------
+    ValueError
+        If *provider* is unknown.
+    """
+    cfg = get_provider_config(provider)
+    resolved_model = model or resolve_model_name(provider)
+    resolved_api_base = cfg.build_api_base(api_base)
+
+    # Validate required params
+    for param in cfg.required_params:
+        value = locals().get(param)
+        if value is None:
+            raise ValueError(
+                f"Provider {provider!r} requires '{param}' but none was provided."
+            )
+
     return LiteLLMClient(
-        provider="ollama",
-        model=resolve_model_name("ollama"),
-        api_base=endpoint,
-        proxy_port=default_proxy_port,
+        provider=provider,
+        model=resolved_model,
+        api_base=resolved_api_base,
+        api_key=api_key,
+        proxy_port=proxy_port,
+        http_proxy_port=http_proxy_port,
+        https_proxy_port=https_proxy_port,
     )
 
 
-def _build_github_client() -> LiteLLMClient:
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        raise ValueError("Missing GITHUB_TOKEN in environment.")
-    endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
-    default_proxy_port = _read_proxy_port_from_env()
-    return LiteLLMClient(
-        provider="github",
-        model=resolve_model_name("github"),
-        api_base=endpoint,
-        api_key=token,
-        proxy_port=default_proxy_port,
-    )
-
-
-def _build_deepseek_client() -> LiteLLMClient:
-    token = os.getenv("DEEPSEEK_TOKEN")
-    if not token:
-        raise ValueError("Missing DEEPSEEK_TOKEN in environment.")
-    endpoint = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-    model_name = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-    default_proxy_port = _read_proxy_port_from_env()
-    return LiteLLMClient(
-        provider="deepseek",
-        model=f"deepseek/{model_name}",
-        api_base=endpoint,
-        api_key=token,
-        proxy_port=default_proxy_port,
-    )
+# ---------------------------------------------------------------------------
+# Legacy ModelRequestFactory (deprecated, kept for backward compat)
+# ---------------------------------------------------------------------------
 
 
 class ModelRequestFactory:
-    """Factory that creates provider-specific LiteLLM clients from env config."""
+    """Legacy factory — kept for backward compatibility.
 
-    _registry: dict[str, Any] = {
-        "ollama": _build_ollama_client,
-        "github": _build_github_client,
-        "deepseek": _build_deepseek_client,
-    }
-
-    @classmethod
-    def register(cls, name: str, builder: Any) -> None:
-        cls._registry[name] = builder
-
-    @classmethod
-    def get(cls, provider: str) -> Any:
-        try:
-            return cls._registry[provider]
-        except KeyError:
-            available = ", ".join(sorted(cls._registry))
-            raise ValueError(f"Unknown provider {provider!r}. Available: {available}.")
-
-    @classmethod
-    def available(cls) -> list[str]:
-        return sorted(cls._registry)
+    Prefer :func:`create_llm_client` in new code.
+    """
 
     @classmethod
     def create(cls, provider: str) -> LiteLLMClient:
-        return cls.get(provider)()
+        kwargs: dict[str, Any] = {}
+        cfg = get_provider_config(provider)
+        resolved_model = resolve_model_name(provider)
+        resolved_api_base = cfg.build_api_base(None)
+
+        if provider == "ollama":
+            kwargs["api_base"] = _normalize_ollama_endpoint(
+                os.getenv("OLLAMA_ENDPOINT", resolved_api_base)
+            )
+        elif provider == "github":
+            token = os.getenv("GITHUB_TOKEN")
+            if not token:
+                raise ValueError("Missing GITHUB_TOKEN in environment.")
+            kwargs["api_key"] = token
+            kwargs["api_base"] = os.getenv("GITHUB_ENDPOINT", resolved_api_base)
+        elif provider == "deepseek":
+            token = os.getenv("DEEPSEEK_TOKEN")
+            if not token:
+                raise ValueError("Missing DEEPSEEK_TOKEN in environment.")
+            kwargs["api_key"] = token
+            kwargs["api_base"] = os.getenv("DEEPSEEK_BASE_URL", resolved_api_base)
+        elif provider == "proxied_github":
+            kwargs["api_base"] = os.getenv("GITHUB_ENDPOINT", resolved_api_base)
+        elif provider == "proxied_deepseek":
+            kwargs["api_base"] = os.getenv("DEEPSEEK_BASE_URL", resolved_api_base)
+        else:
+            raise ValueError(f"Unknown provider {provider!r}.")
+
+        proxy_port = _read_proxy_port_from_env()
+        return LiteLLMClient(
+            provider=provider,
+            model=resolved_model,
+            **kwargs,
+            proxy_port=proxy_port,
+        )
+
+    @classmethod
+    def available(cls) -> list[str]:
+        return sorted(_PROVIDER_CONFIGS)
+
+    @classmethod
+    def register(cls, name: str, builder: Any) -> None:
+        raise NotImplementedError(
+            "ModelRequestFactory.register is deprecated. "
+            "Use register_provider_config() instead."
+        )
+
+    @classmethod
+    def get(cls, provider: str) -> Any:
+        cfg = get_provider_config(provider)
+        return lambda: cls.create(provider)
 
 
 def _normalize_ollama_endpoint(endpoint: str) -> str:
