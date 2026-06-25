@@ -1,16 +1,33 @@
+"""CLI tool for querying LLM providers via the factory.
+
+Usage::
+
+    python scripts/litellm_query_v2.py --target ollama --format markdown
+    python scripts/litellm_query_v2.py --target github --prompt "Hello"
+"""
+
 import argparse
+import sys
+import os
 
 from dotenv import load_dotenv
-from payload import ModelRequest, RequestPayload, ResponseFactory
+
+# Ensure src/ is on sys.path
+_src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+if _src not in sys.path:
+    sys.path.insert(0, _src)
+
+from fin_ai.core.request import create_llm_client, RequestPayload  # noqa: E402
+from fin_ai.core.response import ResponseFactory  # noqa: E402
 
 
 def main() -> None:
     load_dotenv(override=True)
 
-    parser = argparse.ArgumentParser(description="LiteLLM query for Ollama and GitHub Models")
+    parser = argparse.ArgumentParser(description="LiteLLM query via create_llm_client")
     parser.add_argument(
         "--target",
-        choices=["ollama", "github", "all"],
+        choices=["ollama", "github", "deepseek", "all"],
         default="all",
         help="Which backend to query.",
     )
@@ -18,7 +35,7 @@ def main() -> None:
         "--format",
         choices=ResponseFactory.available(),
         default="console",
-        help="Response rendering format: console (default), text, or markdown.",
+        help="Response rendering format.",
     )
     parser.add_argument(
         "--prompt",
@@ -26,28 +43,20 @@ def main() -> None:
         help="Prompt text to send to the model.",
     )
     args = parser.parse_args()
+    response_class = ResponseFactory.get(args.format)
 
-    request = RequestPayload(prompt=args.prompt, temperature=0.2)
+    payload = RequestPayload(prompt=args.prompt, temperature=0.2)
 
-    if args.target in ("ollama", "all"):
-        print("\n=== OLLAMA ===")
+    targets = ["ollama", "github"] if args.target == "all" else [args.target]
+
+    for target in targets:
+        print(f"\n=== {target.upper()} ===")
         try:
-            response = ModelRequest("ollama", format=args.format).request(request)
+            client = create_llm_client(target)
+            response = client.send(payload, response_class=response_class)
             response.to_console()
         except Exception as exc:
-            raise RuntimeError(
-                "Failed to query Ollama. Verify OLLAMA_ENDPOINT and OLLAMA_MODEL configuration."
-            ) from exc
-
-    if args.target in ("github", "all"):
-        print("\n=== GITHUB MODELS ===")
-        try:
-            response = ModelRequest("github", format=args.format).request(request)
-            response.to_console()
-        except Exception as exc:
-            raise RuntimeError(
-                "Failed to query GitHub Models. Verify GITHUB_TOKEN, GITHUB_MODEL, and GITHUB_ENDPOINT."
-            ) from exc
+            print(f"Failed to query {target}: {exc}")
 
 
 if __name__ == "__main__":

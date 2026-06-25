@@ -64,6 +64,30 @@
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": false
+        },
+        {
+            "name": "Yahoo Finance Download",
+            "type": "debugpy",
+            "request": "launch",
+            "python": "${command:python.interpreterPath}",
+            "program": "${workspaceFolder}/scripts/yahoo_finance_download.py",
+            "args": [
+                "--tickers",
+                "${input:yahooTickers}",
+                "--start",
+                "${input:yahooStartDate}",
+                "--end",
+                "${input:yahooEndDate}",
+                "--format",
+                "${input:yahooFormat}",
+                "--types",
+                "${input:yahooDataTypes}",
+                "--data-dir",
+                "${input:yahooDataDir}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
         }
     ],
     "compounds": [
@@ -129,6 +153,42 @@
             "type": "promptString",
             "description": "Folder where downloaded files will be stored",
             "default": "${workspaceFolder}/downloads/google"
+        },
+        {
+            "id": "yahooTickers",
+            "type": "promptString",
+            "description": "Comma-separated ticker symbols (e.g. AAPL,MSFT,NVDA)",
+            "default": "AAPL,MSFT,GOOGL"
+        },
+        {
+            "id": "yahooStartDate",
+            "type": "promptString",
+            "description": "Start date for price data (YYYY-MM-DD)",
+            "default": "2024-01-01"
+        },
+        {
+            "id": "yahooEndDate",
+            "type": "promptString",
+            "description": "End date for price data (YYYY-MM-DD)",
+            "default": "2025-12-31"
+        },
+        {
+            "id": "yahooFormat",
+            "type": "promptString",
+            "description": "Output format: json, csv, pkl, or parquet",
+            "default": "parquet"
+        },
+        {
+            "id": "yahooDataTypes",
+            "type": "promptString",
+            "description": "Data types to download (comma-separated), or leave empty for all",
+            "default": "stock_data,stock_info,company_info,dividends,income_stmt,balance_sheet,cash_flow,analyst_recommendations"
+        },
+        {
+            "id": "yahooDataDir",
+            "type": "promptString",
+            "description": "Root output directory for downloaded data",
+            "default": "${workspaceFolder}/data"
         }
     ]
 
