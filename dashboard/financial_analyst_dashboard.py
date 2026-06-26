@@ -62,7 +62,9 @@ from fin_ai.core.processor import (
     answer_question,
     build_query_source_configs,
     clear_history,
+    discover_source_groups,
     fetch_models,
+    filter_stores_by_source_groups,
     # find_source_document,
     get_source_vector_stores,
     get_vector_db_names,
@@ -70,7 +72,6 @@ from fin_ai.core.processor import (
     load_vector_stores_for_query,
     process_uploaded_document,
     purge_vector_db,
-    # resolve_chat_provider_env,
     save_history_entry,
     build_agent_llm_config,
     run_agent_task,
@@ -249,7 +250,7 @@ def display_csv_in_sidebar(csv_path: str | Path, file_name: str) -> None:
 # -- Page layout
 # ---------------------------------------------------------------------------
 
-st.title("Financial Data Analysis")
+st.title("FinAI Research Studio")
 
 # Discover vector stores
 source_vector_stores = get_source_vector_stores()
@@ -259,124 +260,123 @@ available_chat_models, available_embedding_models, model_load_error = get_local_
 # ---------------------------------------------------------------------------
 # -- Reasoning -----------------------------------------------------------
 # ---------------------------------------------------------------------------
-if vector_db_names:
-    st.sidebar.subheader("Reasoning")
-    st.sidebar.caption(
-        "Choose the LLM that will analyse the retrieved context and generate "
-        "answers. Select a provider, model, response format, and optional "
-        "financial data tools."
-    )
+st.sidebar.subheader("Reasoning")
+st.sidebar.caption(
+    "Choose the LLM that will analyse the retrieved context and generate "
+    "answers. Select a provider, model, response format, and optional "
+    "financial data tools."
+)
 
-    # Build provider label→key mapping from ProviderConfig
-    _all_cfgs = known_providers()
-    provider_label_to_key = {cfg.label: name for name, cfg in _all_cfgs.items()}
-    default_provider = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
-    provider_labels = list(provider_label_to_key.keys())
-    default_provider_index = next(
-        (i for i, k in enumerate(provider_labels) if provider_label_to_key[k] == default_provider), 0,
-    )
-    selected_provider_label = st.sidebar.selectbox("Select Provider", provider_labels, index=default_provider_index, key="chat_provider")
-    selected_provider = provider_label_to_key[selected_provider_label]
-    _pcfg = get_provider_config(selected_provider)
+# Build provider label→key mapping from ProviderConfig
+_all_cfgs = known_providers()
+provider_label_to_key = {cfg.label: name for name, cfg in _all_cfgs.items()}
+default_provider = os.getenv("DEFAULT_PROVIDER", "ollama").strip().lower()
+provider_labels = list(provider_label_to_key.keys())
+default_provider_index = next(
+    (i for i, k in enumerate(provider_labels) if provider_label_to_key[k] == default_provider), 0,
+)
+selected_provider_label = st.sidebar.selectbox("Select Provider", provider_labels, index=default_provider_index, key="chat_provider")
+selected_provider = provider_label_to_key[selected_provider_label]
+_pcfg = get_provider_config(selected_provider)
 
-    # Initialise provider-scoped vars with safe defaults
-    github_token = os.getenv("GITHUB_TOKEN", "")
-    github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
-    deepseek_token = os.getenv("DEEPSEEK_TOKEN", "")
-    deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL)
-    http_proxy_port: int | None = None
-    https_proxy_port: int | None = None
+# Initialise provider-scoped vars with safe defaults
+github_token = os.getenv("GITHUB_TOKEN", "")
+github_endpoint = os.getenv("GITHUB_ENDPOINT", "https://models.github.ai/inference")
+deepseek_token = os.getenv("DEEPSEEK_TOKEN", "")
+deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL)
+http_proxy_port: int | None = None
+https_proxy_port: int | None = None
 
-    # --- Show required / optional params based on ProviderConfig ---
-    if "api_key" in _pcfg.required_params or "api_key" in _pcfg.optional_params:
-        _is_required = "api_key" in _pcfg.required_params
-        _label = "API Key / Token" + (" *" if _is_required else "")
-        _default_val = {"github": os.getenv("GITHUB_TOKEN", ""), "deepseek": os.getenv("DEEPSEEK_TOKEN", "")}.get(selected_provider, "")
-        _value = st.sidebar.text_input(_label, value=_default_val, type="password", key=f"{selected_provider}_api_key")
-        if selected_provider == "github":
-            github_token = _value
-        elif selected_provider == "deepseek":
-            deepseek_token = _value
-
-    if "api_base" in _pcfg.optional_params:
-        _default_base = _pcfg.default_base_url
-        _current_base = os.getenv("GITHUB_ENDPOINT" if "github" in selected_provider else "DEEPSEEK_BASE_URL", _default_base) if selected_provider != "ollama" else os.getenv("OLLAMA_ENDPOINT", _default_base)
-        _base_val = st.sidebar.text_input("API Base URL", value=_current_base, key=f"{selected_provider}_api_base")
-        if selected_provider == "github" or selected_provider == "proxied_github":
-            github_endpoint = _base_val
-        elif selected_provider == "deepseek" or selected_provider == "proxied_deepseek":
-            deepseek_base_url = _base_val
-
-    # Proxy ports: single-port mode (proxy_port) or split-port mode (http_proxy_port, https_proxy_port)
-    _show_proxy = "proxy_port" in _pcfg.optional_params or "http_proxy_port" in _pcfg.optional_params
-    if _show_proxy:
-        with st.sidebar.expander("Proxy Settings", expanded=False):
-            if "proxy_port" in _pcfg.optional_params:
-                _default_proxy = os.getenv("PX_PROXY_PORT", "")
-                proxy_port_val = st.text_input("Proxy Port", value=_default_proxy, key=f"{selected_provider}_proxy_port")
-            if "http_proxy_port" in _pcfg.optional_params or "https_proxy_port" in _pcfg.optional_params:
-                _default_http = os.getenv("PX_HTTP_PROXY_PORT", "")
-                _default_https = os.getenv("PX_HTTPS_PROXY_PORT", "")
-                http_proxy_port_val = st.text_input("HTTP Proxy Port", value=_default_http, key=f"{selected_provider}_http_proxy_port")
-                https_proxy_port_val = st.text_input("HTTPS Proxy Port", value=_default_https, key=f"{selected_provider}_https_proxy_port")
-
-    # --- Model selection ---
+# --- Show required / optional params based on ProviderConfig ---
+if "api_key" in _pcfg.required_params or "api_key" in _pcfg.optional_params:
+    _is_required = "api_key" in _pcfg.required_params
+    _label = "API Key / Token" + (" *" if _is_required else "")
+    _default_val = {"github": os.getenv("GITHUB_TOKEN", ""), "deepseek": os.getenv("DEEPSEEK_TOKEN", "")}.get(selected_provider, "")
+    _value = st.sidebar.text_input(_label, value=_default_val, type="password", key=f"{selected_provider}_api_key")
     if selected_provider == "github":
-        try:
-            with st.spinner("Fetching available GitHub models..."):
-                gh_models = fetch_models("github", api_key=github_token)
-            display_model_options = [m.id for m in gh_models] or [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
-        except Exception:
-            display_model_options = [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
-        default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
-        default_chat_index = display_model_options.index(default_chat_model) if default_chat_model in display_model_options else 0
-        selected_model = st.sidebar.selectbox("Select Model", display_model_options, index=default_chat_index, key="github_model")
-    elif selected_provider == "proxied_github":
-        display_model_options = [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
-        default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
-        selected_model = st.sidebar.text_input("Model", value=default_chat_model, key="proxied_github_model")
-
+        github_token = _value
     elif selected_provider == "deepseek":
-        try:
-            with st.spinner("Fetching available DeepSeek models..."):
-                ds_models = fetch_models("deepseek", api_key=deepseek_token)
-            deepseek_model_ids = [m.id for m in ds_models]
-        except Exception:
-            deepseek_model_ids = []
-        if deepseek_model_ids:
-            default_ds = os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
-            default_ds_idx = deepseek_model_ids.index(default_ds) if default_ds in deepseek_model_ids else 0
-            selected_model = st.sidebar.selectbox("Select Model", deepseek_model_ids, index=default_ds_idx, key="deepseek_model")
-        else:
-            selected_model = st.sidebar.text_input("Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="deepseek_model_fallback")
+        deepseek_token = _value
 
-    elif selected_provider == "proxied_deepseek":
-        selected_model = st.sidebar.text_input("Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="proxied_deepseek_model")
+if "api_base" in _pcfg.optional_params:
+    _default_base = _pcfg.default_base_url
+    _current_base = os.getenv("GITHUB_ENDPOINT" if "github" in selected_provider else "DEEPSEEK_BASE_URL", _default_base) if selected_provider != "ollama" else os.getenv("OLLAMA_ENDPOINT", _default_base)
+    _base_val = st.sidebar.text_input("API Base URL", value=_current_base, key=f"{selected_provider}_api_base")
+    if selected_provider == "github" or selected_provider == "proxied_github":
+        github_endpoint = _base_val
+    elif selected_provider == "deepseek" or selected_provider == "proxied_deepseek":
+        deepseek_base_url = _base_val
 
-    else:  # ollama
-        default_chat_model = os.getenv("OLLAMA_MODEL", DEFAULT_CHAT_MODEL)
-        try:
-            default_chat_index = available_chat_models.index(default_chat_model) if default_chat_model in available_chat_models else 0
-        except ValueError:
-            default_chat_index = 0
-        selected_model = st.sidebar.selectbox("Model", available_chat_models, index=default_chat_index, key="ollama_chat_model")
+# Proxy ports: single-port mode (proxy_port) or split-port mode (http_proxy_port, https_proxy_port)
+_show_proxy = "proxy_port" in _pcfg.optional_params or "http_proxy_port" in _pcfg.optional_params
+if _show_proxy:
+    with st.sidebar.expander("Proxy Settings", expanded=False):
+        if "proxy_port" in _pcfg.optional_params:
+            _default_proxy = os.getenv("PX_PROXY_PORT", "")
+            proxy_port_val = st.text_input("Proxy Port", value=_default_proxy, key=f"{selected_provider}_proxy_port")
+        if "http_proxy_port" in _pcfg.optional_params or "https_proxy_port" in _pcfg.optional_params:
+            _default_http = os.getenv("PX_HTTP_PROXY_PORT", "")
+            _default_https = os.getenv("PX_HTTPS_PROXY_PORT", "")
+            http_proxy_port_val = st.text_input("HTTP Proxy Port", value=_default_http, key=f"{selected_provider}_http_proxy_port")
+            https_proxy_port_val = st.text_input("HTTPS Proxy Port", value=_default_https, key=f"{selected_provider}_https_proxy_port")
 
-    response_type = st.sidebar.selectbox("Select Response Type", ["Plain Text", "Markdown", "Python Code"], index=1, key="response_type")
-    auto_truncate_prompt = st.sidebar.checkbox("Auto-truncate prompt (gpt-5 guard)", value=True)
-    use_tools = st.sidebar.checkbox("Enable function tools (financial data)", value=False)
+# --- Model selection ---
+if selected_provider == "github":
+    try:
+        with st.spinner("Fetching available GitHub models..."):
+            gh_models = fetch_models("github", api_key=github_token)
+        display_model_options = [m.id for m in gh_models] or [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
+    except Exception:
+        display_model_options = [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
+    default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
+    default_chat_index = display_model_options.index(default_chat_model) if default_chat_model in display_model_options else 0
+    selected_model = st.sidebar.selectbox("Select Model", display_model_options, index=default_chat_index, key="github_model")
+elif selected_provider == "proxied_github":
+    display_model_options = [os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)]
+    default_chat_model = os.getenv("GITHUB_MODEL", DEFAULT_GITHUB_MODEL)
+    selected_model = st.sidebar.text_input("Model", value=default_chat_model, key="proxied_github_model")
 
-    if use_tools:
-        with st.sidebar.expander("Available tools", expanded=False):
-            from fin_ai.core.tools import YAHOO_FINANCE_TOOLS
-            for tool in YAHOO_FINANCE_TOOLS:
-                if tool.get("type") == "function":
-                    fn = tool["function"]
-                    st.sidebar.markdown(f"**`{fn['name']}`** — {fn.get('description', '')}")
+elif selected_provider == "deepseek":
+    try:
+        with st.spinner("Fetching available DeepSeek models..."):
+            ds_models = fetch_models("deepseek", api_key=deepseek_token)
+        deepseek_model_ids = [m.id for m in ds_models]
+    except Exception:
+        deepseek_model_ids = []
+    if deepseek_model_ids:
+        default_ds = os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL)
+        default_ds_idx = deepseek_model_ids.index(default_ds) if default_ds in deepseek_model_ids else 0
+        selected_model = st.sidebar.selectbox("Select Model", deepseek_model_ids, index=default_ds_idx, key="deepseek_model")
+    else:
+        selected_model = st.sidebar.text_input("Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="deepseek_model_fallback")
 
-    if model_load_error:
-        st.sidebar.warning(model_load_error)
+elif selected_provider == "proxied_deepseek":
+    selected_model = st.sidebar.text_input("Model", value=os.getenv("DEEPSEEK_MODEL", DEFAULT_DEEPSEEK_MODEL), key="proxied_deepseek_model")
 
-    # ---------------------------------------------------------------------------
+else:  # ollama
+    default_chat_model = os.getenv("OLLAMA_MODEL", DEFAULT_CHAT_MODEL)
+    try:
+        default_chat_index = available_chat_models.index(default_chat_model) if default_chat_model in available_chat_models else 0
+    except ValueError:
+        default_chat_index = 0
+    selected_model = st.sidebar.selectbox("Model", available_chat_models, index=default_chat_index, key="ollama_chat_model")
+
+response_type = st.sidebar.selectbox("Select Response Type", ["Plain Text", "Markdown", "Python Code"], index=1, key="response_type")
+auto_truncate_prompt = st.sidebar.checkbox("Auto-truncate prompt (gpt-5 guard)", value=True)
+use_tools = st.sidebar.checkbox("Enable function tools (financial data)", value=False)
+
+if use_tools:
+    with st.sidebar.expander("Available tools", expanded=False):
+        from fin_ai.core.tools import YAHOO_FINANCE_TOOLS
+        for tool in YAHOO_FINANCE_TOOLS:
+            if tool.get("type") == "function":
+                fn = tool["function"]
+                st.sidebar.markdown(f"**`{fn['name']}`** — {fn.get('description', '')}")
+
+if model_load_error:
+    st.sidebar.warning(model_load_error)
+
+# ---------------------------------------------------------------------------
 # -- Embedding -----------------------------------------------------------
 # ---------------------------------------------------------------------------
 st.sidebar.caption(
@@ -448,6 +448,43 @@ if vector_db_names:
 
     # -- Maintenance ---------------------------------------------------------
     with st.sidebar.expander("Maintenance", expanded=False):
+        from fin_ai.core.rag import RAGSourceStore, discover_vector_stores_by_source
+
+        st.sidebar.caption("Registered RAG Sources")
+        rag_store = RAGSourceStore()
+        # Only show sources that have a FAISS index on disk
+        on_disk_stores = discover_vector_stores_by_source()
+        df_sources = rag_store.to_dataframe()
+        if not df_sources.empty and on_disk_stores:
+            df_on_disk = df_sources[df_sources["name"].isin(on_disk_stores)].copy()
+            if not df_on_disk.empty:
+                st.sidebar.dataframe(
+                    df_on_disk[["name", "source_type", "chunk_count", "embedding_model"]],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                total = len(df_on_disk)
+                total_chunks = df_on_disk["chunk_count"].sum()
+                st.sidebar.caption(f"{total} FAISS index(es) · {int(total_chunks):,} chunk(s)")
+            else:
+                st.sidebar.caption("No FAISS index found for registered sources.")
+        elif on_disk_stores and df_sources.empty:
+            st.sidebar.caption(f"{len(on_disk_stores)} FAISS index(es) found — sync to register.")
+        else:
+            st.sidebar.caption("No FAISS indexes found.")
+
+        sync_col, _ = st.sidebar.columns([1, 2])
+        with sync_col:
+            if st.sidebar.button("Sync Sources", key="rag_sync_btn"):
+                added = rag_store.sync_from_disk()
+                if added:
+                    st.sidebar.success(f"Added {added} new source(s) from disk.")
+                    st.rerun()
+                else:
+                    st.sidebar.info("All sources already registered.")
+
+        st.sidebar.divider()
+
         st.sidebar.warning("This permanently deletes a vector DB and all related files.")
         _purge_db = st.sidebar.selectbox("Select DB to purge", vector_db_names, key="purge_db_select")
         confirm_purge = st.sidebar.checkbox(f"Confirm purge of '{_purge_db}'", key="confirm_purge_main")
@@ -470,55 +507,54 @@ selected_agent = ""
 agent_format = "html"
 agent_email = ""
 
-if vector_db_names:
+st.subheader("Agent Workflows")
+st.caption(
+    "Run agentic research workflows with configurable LLM backends. "
+    "Agents can access market data tools (offline/online) and indexed "
+    "RAG documents when available."
+)
 
-    st.subheader("Agent Workflows")
-    st.caption(
-        "Run agentic workflows against your vector stores. Agents share the "
-        "RAG configuration below (vector DB sources, retrieval mode)."
+agent_col1, agent_col2 = st.columns([2, 1])
+with agent_col1:
+    selected_agent = st.selectbox(
+        "Select Agent Profile",
+        [n for n in agent_library],
+        index=0,
+        key="agent_profile_main",
+    )
+with agent_col2:
+    agent_format = st.selectbox(
+        "Report format",
+        ["html", "pdf"],
+        index=0,
+        key="agent_format_main",
     )
 
-    agent_col1, agent_col2 = st.columns([2, 1])
-    with agent_col1:
-        selected_agent = st.selectbox(
-            "Select Agent Profile",
-            [n for n in agent_library],
-            index=0,
-            key="agent_profile_main",
-        )
-    with agent_col2:
-        agent_format = st.selectbox(
-            "Report format",
-            ["html", "pdf"],
-            index=0,
-            key="agent_format_main",
-        )
+agent_rag_query = st.text_area(
+    "Agent Task Prompt",
+    placeholder='e.g. "Analyse NVDA financials and competitive position"',
+    key="agent_prompt_main",
+    height=80,
+)
 
-    agent_rag_query = st.text_area(
-        "Agent Task Prompt",
-        placeholder='e.g. "Analyse NVDA financials and competitive position"',
-        key="agent_prompt_main",
-        height=80,
+agent_col_a, agent_col_b, agent_col_c = st.columns([1, 1, 3])
+with agent_col_a:
+    agent_submit = st.button(" Run Agent", key="run_agent_main", type="primary", use_container_width=True)
+with agent_col_b:
+    if st.button("Clear Output", key="clear_agent_main", use_container_width=True):
+        st.session_state.pop("agent_response", None)
+        st.session_state.pop("agent_publication", None)
+        st.session_state.pop("latest_response", None)
+        st.session_state.pop("latest_retrieval", None)
+        st.rerun()
+with agent_col_c:
+    agent_email = st.text_input(
+        "Email report (optional)",
+        placeholder="analyst@firm.com",
+        key="agent_email_main",
     )
 
-    agent_col_a, agent_col_b, agent_col_c = st.columns([1, 1, 3])
-    with agent_col_a:
-        agent_submit = st.button(" Run Agent", key="run_agent_main", type="primary", use_container_width=True)
-    with agent_col_b:
-        if st.button("Clear Output", key="clear_agent_main", use_container_width=True):
-            st.session_state.pop("agent_response", None)
-            st.session_state.pop("agent_publication", None)
-            st.session_state.pop("latest_response", None)
-            st.session_state.pop("latest_retrieval", None)
-            st.rerun()
-    with agent_col_c:
-        agent_email = st.text_input(
-            "Email report (optional)",
-            placeholder="analyst@firm.com",
-            key="agent_email_main",
-        )
-
-    st.divider()
+st.divider()
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -526,13 +562,16 @@ if vector_db_names:
 # ---------------------------------------------------------------------------
 
 # Initialise shared variables with sensible defaults
+_selected_source_groups = st.session_state.get("query_source_groups", [])
 _selected_query_vector_dbs = st.session_state.get("query_vector_dbs", vector_db_names[:1])
 _retrieval_mode = st.session_state.get("retrieval_mode", "ensemble")
 selected_query_vector_dbs = vector_db_names[:1] if not vector_db_names else _selected_query_vector_dbs
 retrieval_mode = _retrieval_mode
 selected_source_names = []
 available_source_names = []
+available_source_groups: list[str] = []
 query_source_configs = []
+loaded_stores: dict[str, FAISS] = {}
 
 # Load embeddings and vector stores for RAG querying
 embeddings = None
@@ -572,59 +611,76 @@ if vector_db_names:
         loaded_stores = load_vector_stores_for_query(selected_query_vector_dbs, source_vector_stores, embeddings)
         query_source_configs = build_query_source_configs(loaded_stores, group_by="vector_db")
         available_source_names = [c.name for c in query_source_configs]
+        # Discover source groups (source_type values) from loaded stores
+        source_groups_map = discover_source_groups(loaded_stores)
+        available_source_groups = sorted(source_groups_map.keys())
     except (ValueError, RuntimeError) as e:
         st.sidebar.error(str(e))
         loaded_stores = {}
         query_source_configs = []
         available_source_names = []
+        available_source_groups = []
+        source_groups_map = {}
 
+st.subheader("RAG Query")
+
+# Upload document inline (always visible — even when vector_db is empty)
+with st.expander("Upload New Document", expanded=not bool(vector_db_names)):
+    selected_source_type = st.selectbox("Type of Source Document", SUPPORTED_UPLOAD_TYPES, index=0, key="source_type_rag")
+    uploaded_file = st.file_uploader("Upload a document for analysis", type=SUPPORTED_UPLOAD_TYPES, key="upload_rag")
+    if uploaded_file:
+        binary = uploaded_file.getvalue()
+        if st.button("Process Document and Store in Vector DB", key="process_rag"):
+            with st.spinner("Processing document..."):
+                _gh_tok = os.environ.get("GITHUB_TOKEN", "")
+                if selected_emb_provider == "github":
+                    try:
+                        _gh_tok = embedding_github_token or _gh_tok
+                    except NameError:
+                        pass
+                result_upload = process_uploaded_document(
+                    file_binary=binary,
+                    file_name=uploaded_file.name,
+                    embedding_model=selected_embedding_model,
+                    embedding_base_url=embeddings_base_url,
+                    emb_provider=selected_emb_provider,
+                    source_type=selected_source_type,
+                    github_token=_gh_tok if selected_emb_provider == "github" else None,
+                )
+                st.success("Document processed and stored in the vector database.")
+                st.caption(f"Document processing completed in {result_upload['elapsed']:.2f} seconds.")
+                st.rerun()
+
+# --- Source selection & querying (only when stores exist) ---
 if vector_db_names:
 
-    st.subheader("RAG Query")
+    # --- Source Groups (top-level filter: pdf / csv / json / html / url) ---
+    if available_source_groups:
+        selected_source_groups = st.multiselect(
+            "Source Groups",
+            available_source_groups,
+            default=(
+                _selected_source_groups
+                if _selected_source_groups
+                else available_source_groups
+            ),
+            key="query_source_groups",
+            help="Select document type(s) to search within.",
+        )
+        # Filter available documents to only those in selected groups
+        group_filtered_stores = filter_stores_by_source_groups(loaded_stores, selected_source_groups)
+        filtered_doc_names = sorted(group_filtered_stores.keys())
+    else:
+        selected_source_groups = []
+        filtered_doc_names = available_source_names
 
-    # Upload document inline
-    with st.expander("Upload New Document", expanded=False):
-        selected_source_type = st.selectbox("Type of Source Document", SUPPORTED_UPLOAD_TYPES, index=0, key="source_type_rag")
-        uploaded_file = st.file_uploader("Upload a document for analysis", type=SUPPORTED_UPLOAD_TYPES, key="upload_rag")
-        if uploaded_file:
-            binary = uploaded_file.getvalue()
-            if st.button("Process Document and Store in Vector DB", key="process_rag"):
-                with st.spinner("Processing document..."):
-                    _gh_tok = os.environ.get("GITHUB_TOKEN", "")
-                    if selected_emb_provider == "github":
-                        try:
-                            _gh_tok = embedding_github_token or _gh_tok
-                        except NameError:
-                            pass
-                    result_upload = process_uploaded_document(
-                        file_binary=binary,
-                        file_name=uploaded_file.name,
-                        embedding_model=selected_embedding_model,
-                        embedding_base_url=embeddings_base_url,
-                        emb_provider=selected_emb_provider,
-                        source_type=selected_source_type,
-                        github_token=_gh_tok if selected_emb_provider == "github" else None,
-                    )
-                    st.success("Document processed and stored in the vector database.")
-                    st.caption(f"Document processing completed in {result_upload['elapsed']:.2f} seconds.")
-                    st.rerun()
-
-    # Query vector DB sources (multi-select)
+    # --- Query Vector Documents (filtered by source groups) ---
     selected_query_vector_dbs = st.multiselect(
-        "Query Vector DB Sources",
-        vector_db_names,
+        "Query Vector Documents",
+        filtered_doc_names,
         default=selected_query_vector_dbs,
         key="query_vector_dbs",
     )
-
-    # Restrict to source groups (dynamic from loaded stores)
-    if available_source_names:
-        selected_source_names = st.multiselect(
-            "Restrict to Source Groups",
-            available_source_names,
-            default=available_source_names,
-            key="restrict_sources",
-        )
 
     # Retrieval mode below source groups
     retrieval_mode = st.selectbox("Retrieval Mode", ["ensemble", "separate", "routed"], index=0, key="retrieval_mode")
@@ -639,22 +695,14 @@ if vector_db_names:
     if submit_clicked and question:
         if not query_source_configs:
             st.error("No vector database sources are available. Please load vector databases first.")
-        elif not selected_source_names:
-            st.error("Select at least one source group before submitting a question.")
+        elif not selected_query_vector_dbs:
+            st.error("Select at least one document before submitting a question.")
         else:
-            active_configs = [c for c in query_source_configs if c.name in selected_source_names]
+            active_configs = [c for c in query_source_configs if c.name in selected_query_vector_dbs]
             if not active_configs:
-                st.error("The selected source groups are not available. Please re-select your source groups.")
+                st.error("The selected documents are not available. Please re-select.")
             else:
                 with st.spinner("Answering your question..."):
-                    resolve_chat_provider_env(
-                        selected_provider,
-                        github_token=github_token if selected_provider in ("github",) else "",
-                        deepseek_token=deepseek_token if selected_provider in ("deepseek",) else "",
-                        deepseek_base_url=deepseek_base_url if selected_provider in ("deepseek", "proxied_deepseek") else "",
-                        github_endpoint=github_endpoint if selected_provider in ("github", "proxied_github") else "",
-                        selected_model=selected_model,
-                    )
                     result = answer_question(
                         question,
                         active_configs,

@@ -36,6 +36,7 @@ from fin_ai.core.embeddings import create_embeddings
 logger = logging.getLogger(__name__)
 
 from fin_ai.core.rag import (
+    RAGSourceStore,
     create_or_load_vector_store,
     discover_vector_stores_by_source,
     get_markdown_splits,
@@ -162,12 +163,26 @@ def process_uploaded_document(
     source_path = Path(VECTOR_DB_DIR) / file_name
     source_path.write_bytes(file_binary)
 
+    # Record in the RAGSourceStore
+    rag_store = RAGSourceStore()
+    rag_store.add_from_metadata(
+        name=base_name,
+        source_type=source_type,
+        filename=file_name,
+        file_size=len(file_binary),
+        chunk_count=len(chunks),
+        embedding_provider=emb_provider,
+        embedding_model=embedding_model,
+        embedding_base_url=embedding_base_url,
+    )
+
     temp_path.unlink(missing_ok=True)
 
     return {
         "vector_db_name": base_name,
         "elapsed": perf_counter() - start_time,
         "doc_metadata": document_metadata,
+        "rag_source": base_name,
     }
 
 
@@ -225,6 +240,64 @@ def build_query_source_configs(
             build_source_retriever_configs(store, base_name=name, group_by=group_by, search_k=5)
         )
     return configs
+
+
+def discover_source_groups(
+    loaded_stores: dict[str, FAISS] | None = None,
+) -> dict[str, list[str]]:
+    """Discover source groups and the documents within each group.
+
+    A *source group* is a ``source_type`` value (e.g. ``"pdf"``, ``"csv"``,
+    ``"json"``, ``"html"``, ``"url"``).  Each group maps to the list of
+    vector-store names whose documents share that ``source_type``.
+
+    Uses the ``RAGSourceStore`` registry for fast lookup.  When *loaded_stores*
+    is provided it is used as a fallback for any names not found in the
+    registry, then the registry is updated.
+
+    Returns a dict like ``{"pdf": ["NVDA_report", "Ball Report"],
+    "csv": ["credit_card_transactions_sample"]}``.
+    """
+    rag_store = RAGSourceStore()
+    groups = dict(rag_store.get_groups())
+
+    # Back-fill from loaded stores for any names not yet in the registry
+    if loaded_stores:
+        for store_name in loaded_stores:
+            if any(store_name in names for names in groups.values()):
+                continue
+            # Peek at the first document's metadata as fallback
+            try:
+                store = loaded_stores[store_name]
+                if hasattr(store, "index_to_docstore_id"):
+                    doc_ids = list(store.index_to_docstore_id.values())
+                elif hasattr(store, "docstore") and hasattr(store.docstore, "_dict"):
+                    doc_ids = list(store.docstore._dict.keys())
+                else:
+                    doc_ids = []
+                first_id = doc_ids[0] if doc_ids else None
+                source_type = "unknown"
+                if first_id:
+                    doc = store.docstore.search(first_id)
+                    if doc and hasattr(doc, "metadata"):
+                        source_type = doc.metadata.get("source_type", "unknown")
+                groups.setdefault(source_type, []).append(store_name)
+            except Exception:
+                groups.setdefault("unknown", []).append(store_name)
+
+    return groups
+
+
+def filter_stores_by_source_groups(
+    loaded_stores: dict[str, FAISS],
+    selected_groups: list[str],
+) -> dict[str, FAISS]:
+    """Filter *loaded_stores* to only those belonging to the selected source groups."""
+    groups = discover_source_groups(loaded_stores)
+    allowed_names: set[str] = set()
+    for group in selected_groups:
+        allowed_names.update(groups.get(group, []))
+    return {name: store for name, store in loaded_stores.items() if name in allowed_names}
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +602,11 @@ def clear_history(vector_db_name: str) -> None:
 
 
 def purge_vector_db(vector_db_name: str) -> list[Path]:
-    return purge_vector_db_assets(vector_db_name, Path(VECTOR_DB_DIR), QUESTION_HISTORY_DIR)
+    deleted = purge_vector_db_assets(vector_db_name, Path(VECTOR_DB_DIR), QUESTION_HISTORY_DIR)
+    # Also remove from the RAGSourceStore registry
+    rag_store = RAGSourceStore()
+    rag_store.remove(vector_db_name)
+    return deleted
 
 
 # ---------------------------------------------------------------------------
