@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import json
 import logging
@@ -6,6 +8,7 @@ import tempfile
 import warnings
 import json
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 
@@ -72,6 +75,250 @@ def load_embedding_metadata(filename: str) -> dict[str, str] | None:
         "model": model,
         "base_url": base_url,
     }
+
+
+# ---------------------------------------------------------------------------
+# RAGSource — structured metadata for an indexed document
+# ---------------------------------------------------------------------------
+
+_RAG_SOURCES_JSON = "rag_sources.json"
+
+
+@dataclass
+class RAGSource:
+    """Structured metadata for one indexed RAG document source.
+
+    Persisted in ``{VECTOR_DB_DIR}/rag_sources.json`` and can be back-filled
+    from the individual ``.embedding.json`` files for existing stores.
+    """
+
+    name: str
+    source_type: str
+    filename: str
+    file_size: int = 0
+    chunk_count: int = 0
+    embedding_provider: str = ""
+    embedding_model: str = ""
+    embedding_base_url: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict) -> RAGSource:
+        return cls(**{k: data.get(k, "") for k in cls.__dataclass_fields__})
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "source_type": self.source_type,
+            "filename": self.filename,
+            "file_size": self.file_size,
+            "chunk_count": self.chunk_count,
+            "embedding_provider": self.embedding_provider,
+            "embedding_model": self.embedding_model,
+            "embedding_base_url": self.embedding_base_url,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+class RAGSourceStore:
+    """JSON-backed registry of all indexed RAG sources.
+
+    The store is a single JSON file (``{VECTOR_DB_DIR}/rag_sources.json``)
+    that tracks every indexed document's metadata.  It is updated atomically
+    whenever a source is added or removed.
+
+    In the future the backing store can be swapped for a database without
+    changing the public API.
+    """
+
+    def __init__(self, vector_db_dir: str | Path | None = None) -> None:
+        self._dir = Path(vector_db_dir or VECTOR_DB_DIR)
+        self._path = self._dir / _RAG_SOURCES_JSON
+        self._sources: dict[str, RAGSource] = {}
+        self._load()
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def _load(self) -> None:
+        """Load sources from the JSON file (if it exists)."""
+        if not self._path.exists():
+            self._sources = {}
+            return
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                self._sources = {s["name"]: RAGSource.from_dict(s) for s in raw}
+            elif isinstance(raw, dict):
+                self._sources = {k: RAGSource.from_dict(v) for k, v in raw.items()}
+            else:
+                self._sources = {}
+        except (json.JSONDecodeError, OSError):
+            self._sources = {}
+
+    def _save(self) -> None:
+        """Atomically write the sources list to the JSON file."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        records = [s.to_dict() for s in self._sources.values()]
+        tmp = self._path.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        tmp.replace(self._path)
+
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
+    def add(self, source: RAGSource) -> RAGSource:
+        """Add or replace a source record."""
+        self._sources[source.name] = source
+        self._save()
+        return source
+
+    def add_from_metadata(
+        self,
+        name: str,
+        source_type: str,
+        filename: str,
+        file_size: int = 0,
+        chunk_count: int = 0,
+        embedding_provider: str = "",
+        embedding_model: str = "",
+        embedding_base_url: str = "",
+    ) -> RAGSource:
+        """Convenience: create and persist a ``RAGSource`` in one call."""
+        now = datetime.now().isoformat()
+        source = RAGSource(
+            name=name,
+            source_type=source_type,
+            filename=filename,
+            file_size=file_size,
+            chunk_count=chunk_count,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_base_url=embedding_base_url,
+            created_at=now,
+            updated_at=now,
+        )
+        return self.add(source)
+
+    def remove(self, name: str) -> bool:
+        """Remove a source by name.  Returns ``True`` if it existed."""
+        existed = name in self._sources
+        self._sources.pop(name, None)
+        if existed:
+            self._save()
+        return existed
+
+    def get(self, name: str) -> RAGSource | None:
+        return self._sources.get(name)
+
+    def list_all(self) -> list[RAGSource]:
+        return list(self._sources.values())
+
+    def get_groups(self) -> dict[str, list[str]]:
+        """Return a ``{source_type: [name, ...]}`` mapping."""
+        groups: dict[str, list[str]] = {}
+        for s in self._sources.values():
+            t = s.source_type or "unknown"
+            groups.setdefault(t, []).append(s.name)
+        return groups
+
+    def get_documents_in_group(self, source_type: str) -> list[RAGSource]:
+        return [s for s in self._sources.values() if s.source_type == source_type]
+
+    def count(self) -> int:
+        return len(self._sources)
+
+    def to_dataframe(self) -> "pd.DataFrame":
+        """Return a pandas DataFrame suitable for dashboard display."""
+        import pandas as pd
+
+        rows = [s.to_dict() for s in self._sources.values()]
+        return pd.DataFrame(rows) if rows else pd.DataFrame(
+            columns=[
+                "name", "source_type", "filename", "file_size",
+                "chunk_count", "embedding_provider", "embedding_model",
+                "created_at", "updated_at",
+            ]
+        )
+
+    def sync_from_disk(self) -> int:
+        """Scan the vector DB directory and back-fill any missing sources.
+
+        Reads the individual ``.embedding.json`` files and the FAISS
+        docstore metadata to reconstruct ``RAGSource`` entries for any
+        source not already tracked.
+
+        Returns the number of new entries added.
+        """
+        from pathlib import Path as _Path
+
+        added = 0
+
+        # Discover all vector-store directories
+        stores = discover_vector_stores_by_source(self._dir)
+
+        for name, faiss_path in stores.items():
+            if name in self._sources:
+                continue  # already tracked
+
+            emb_meta = load_embedding_metadata(name)
+            source_type = "unknown"
+            filename = name
+            file_size = 0
+            chunk_count = 0
+
+            # Try to open the FAISS store and peek at metadata
+            if emb_meta:
+                try:
+                    import faiss as _faiss
+                    from langchain_community.vectorstores import FAISS as _FAISS
+                    from langchain_community.embeddings import (
+                        OpenAIEmbeddings as _FallbackEmb,
+                    )
+
+                    # We need *some* embeddings to load — use a minimal one
+                    class _DummyEmbeddings:
+                        """Minimal stand-in that returns vectors of the right size."""
+                        def embed_query(self, text: str) -> list[float]:
+                            return [0.0] * 1536
+
+                    vs = _FAISS.load_local(
+                        str(faiss_path),
+                        embeddings=_DummyEmbeddings(),
+                        allow_dangerous_deserialization=True,
+                    )
+                    if hasattr(vs, "index_to_docstore_id"):
+                        doc_ids = list(vs.index_to_docstore_id.values())
+                        chunk_count = len(doc_ids)
+                        if doc_ids:
+                            doc = vs.docstore.search(doc_ids[0])
+                            if doc and hasattr(doc, "metadata"):
+                                md = doc.metadata
+                                source_type = md.get("source_type", "unknown")
+                                filename = md.get("filename", name)
+                                file_size = md.get("file_size", 0)
+                except Exception:
+                    pass
+
+            self.add_from_metadata(
+                name=name,
+                source_type=source_type,
+                filename=filename,
+                file_size=file_size,
+                chunk_count=chunk_count,
+                embedding_provider=(emb_meta or {}).get("provider", ""),
+                embedding_model=(emb_meta or {}).get("model", ""),
+                embedding_base_url=(emb_meta or {}).get("base_url", ""),
+            )
+            added += 1
+
+        return added
 
 
 def _load_and_convert_with_pymupdf(file_path):

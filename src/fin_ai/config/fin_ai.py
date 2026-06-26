@@ -42,6 +42,18 @@ os.makedirs(QUESTION_HISTORY_DIR, exist_ok=True)
 os.makedirs(PUBLISHED_RESEARCH_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
+# Yahoo Finance service mode
+# ---------------------------------------------------------------------------
+
+YAHOO_SERVICE_OFFLINE = (
+    os.environ.get("YAHOO_SERVICE_OFFLINE", "true").strip().lower() == "true"
+)
+YAHOO_DATA_DIR = os.environ.get(
+    "YAHOO_DATA_DIR",
+    str(PROJECT_ROOT / "data"),
+)
+
+# ---------------------------------------------------------------------------
 # Provider endpoints
 # ---------------------------------------------------------------------------
 
@@ -98,6 +110,8 @@ __all__ = [
     "DEFAULT_CHAT_MODEL",
     "DEFAULT_EMBEDDING_MODEL",
     "DEFAULT_EMBEDDINGS_PROVIDER",
+    "YAHOO_SERVICE_OFFLINE",
+    "YAHOO_DATA_DIR",
     "DEFAULT_GITHUB_MODEL",
     "DEFAULT_GITHUB_EMBEDDING_MODEL",
     "DEFAULT_DEEPSEEK_MODEL",

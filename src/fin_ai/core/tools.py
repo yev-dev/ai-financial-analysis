@@ -1,14 +1,35 @@
 
 import json
-import yfinance as yf
 from typing import Any, Optional
+
 import pandas as pd
 from pandas import DataFrame
 
+from fin_ai.core.exceptions import (
+    MarketDataNotFoundError,
+    MarketDataServiceError,
+)
+from fin_ai.core.service import MarketDataService
 
-def _get_ticker(symbol: str) -> yf.Ticker:
-    """Create a yfinance ticker instance from a ticker symbol."""
-    return yf.Ticker(symbol)
+
+# ---------------------------------------------------------------------------
+# Service instance — initialised once at import time
+# ---------------------------------------------------------------------------
+
+_market_service: MarketDataService | None = None
+
+
+def _get_service() -> MarketDataService:
+    """Return the (cached) market data service instance."""
+    global _market_service
+    if _market_service is None:
+        _market_service = MarketDataService.from_environment()
+    return _market_service
+
+
+# ---------------------------------------------------------------------------
+# JSON serialisation helpers (unchanged — kept for the public functions)
+# ---------------------------------------------------------------------------
 
 
 def _to_json_value(value: Any) -> Any:
@@ -51,105 +72,192 @@ def _dataframe_to_records(frame: DataFrame, max_rows: int = 200) -> dict:
     }
 
 
+def _handle_service_error(
+    symbol: str,
+    data_type: str,
+    default_return: dict,
+    exc: Exception,
+) -> dict:
+    """Wrap a service exception into a user-facing error dict.
+
+    Gracefully handles both :class:`MarketDataNotFoundError` and
+    :class:`MarketDataServiceError` so callers (including LLM tool-call
+    dispatch) always receive a structured response.
+    """
+    result = dict(default_return)
+    result["error"] = str(exc)
+    result["error_type"] = type(exc).__name__
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Yahoo Finance tool functions
+# ---------------------------------------------------------------------------
+
+
 def get_stock_data(symbol: str, start_date: str, end_date: str) -> dict:
     """Retrieve stock price data for a ticker symbol within the date range."""
-    ticker = _get_ticker(symbol)
-    stock_data = ticker.history(start=start_date, end=end_date)
-    payload = _dataframe_to_records(stock_data)
-    payload.update({"symbol": symbol, "start_date": start_date, "end_date": end_date})
-    return payload
+    service = _get_service()
+    try:
+        stock_data = service.get_stock_data(symbol, start_date, end_date)
+        payload = _dataframe_to_records(stock_data)
+        payload.update({
+            "symbol": symbol,
+            "start_date": start_date,
+            "end_date": end_date,
+        })
+        return payload
+    except (MarketDataNotFoundError, MarketDataServiceError) as exc:
+        return _handle_service_error(symbol, "stock_data", {
+            "symbol": symbol,
+            "start_date": start_date,
+            "end_date": end_date,
+            "row_count": 0,
+            "truncated": False,
+            "records": [],
+        }, exc)
 
 
 def get_stock_info(symbol: str) -> dict:
     """Fetches and returns latest stock information."""
-    ticker = _get_ticker(symbol)
-    stock_info = ticker.info
-    return {k: _to_json_value(v) for k, v in stock_info.items()}
+    service = _get_service()
+    try:
+        return service.get_stock_info(symbol)
+    except (MarketDataNotFoundError, MarketDataServiceError) as exc:
+        return {"error": str(exc), "error_type": type(exc).__name__}
 
 
 def get_company_info(symbol: str, save_path: Optional[str] = None) -> dict:
     """Fetches and returns company information as a DataFrame."""
-    ticker = _get_ticker(symbol)
-    info = ticker.info
-    company_info = {
-        "Company Name": info.get("shortName", "N/A"),
-        "Industry": info.get("industry", "N/A"),
-        "Sector": info.get("sector", "N/A"),
-        "Country": info.get("country", "N/A"),
-        "Website": info.get("website", "N/A"),
-    }
-    company_info_df = DataFrame([company_info])
-    if save_path:
-        company_info_df.to_csv(save_path)
-        print(f"Company info for {ticker.ticker} saved to {save_path}")
-    return {
-        "symbol": symbol,
-        "company_info": company_info,
-        "saved_to": save_path,
-    }
+    service = _get_service()
+    try:
+        df = service.get_company_info(symbol)
+        if df.empty:
+            return {
+                "symbol": symbol,
+                "company_info": {},
+                "saved_to": None,
+                "error": f"No company info available for '{symbol}'.",
+            }
+        company_info = df.iloc[0].to_dict()
+        if save_path:
+            df.to_csv(save_path)
+            print(f"Company info for {symbol} saved to {save_path}")
+        return {
+            "symbol": symbol,
+            "company_info": company_info,
+            "saved_to": save_path,
+        }
+    except (MarketDataNotFoundError, MarketDataServiceError) as exc:
+        return _handle_service_error(symbol, "company_info", {
+            "symbol": symbol,
+            "company_info": {},
+            "saved_to": save_path,
+        }, exc)
 
 
 def get_stock_dividends(symbol: str, save_path: Optional[str] = None) -> dict:
     """Fetches and returns the latest dividends data as a DataFrame."""
-    ticker = _get_ticker(symbol)
-    dividends = ticker.dividends
-    if save_path:
-        dividends.to_csv(save_path)
-        print(f"Dividends for {ticker.ticker} saved to {save_path}")
-    payload = _dataframe_to_records(dividends.to_frame(name="dividend"))
-    payload.update({"symbol": symbol, "saved_to": save_path})
-    return payload
+    service = _get_service()
+    try:
+        dividends = service.get_stock_dividends(symbol)
+        if save_path:
+            dividends.to_csv(save_path)
+            print(f"Dividends for {symbol} saved to {save_path}")
+        payload = _dataframe_to_records(dividends)
+        payload.update({"symbol": symbol, "saved_to": save_path})
+        return payload
+    except (MarketDataNotFoundError, MarketDataServiceError) as exc:
+        return _handle_service_error(symbol, "dividends", {
+            "symbol": symbol,
+            "saved_to": save_path,
+            "row_count": 0,
+            "truncated": False,
+            "records": [],
+        }, exc)
 
 
 def get_income_stmt(symbol: str) -> dict:
     """Fetches and returns the latest income statement of the company as a DataFrame."""
-    ticker = _get_ticker(symbol)
-    income_stmt = ticker.financials
-    payload = _dataframe_to_records(income_stmt)
-    payload.update({"symbol": symbol})
-    return payload
+    service = _get_service()
+    try:
+        income_stmt = service.get_income_stmt(symbol)
+        payload = _dataframe_to_records(income_stmt)
+        payload.update({"symbol": symbol})
+        return payload
+    except (MarketDataNotFoundError, MarketDataServiceError) as exc:
+        return _handle_service_error(symbol, "income_stmt", {
+            "symbol": symbol,
+            "row_count": 0,
+            "truncated": False,
+            "records": [],
+        }, exc)
 
 
 def get_balance_sheet(symbol: str) -> dict:
     """Fetches and returns the latest balance sheet of the company as a DataFrame."""
-    ticker = _get_ticker(symbol)
-    balance_sheet = ticker.balance_sheet
-    payload = _dataframe_to_records(balance_sheet)
-    payload.update({"symbol": symbol})
-    return payload
+    service = _get_service()
+    try:
+        balance_sheet = service.get_balance_sheet(symbol)
+        payload = _dataframe_to_records(balance_sheet)
+        payload.update({"symbol": symbol})
+        return payload
+    except (MarketDataNotFoundError, MarketDataServiceError) as exc:
+        return _handle_service_error(symbol, "balance_sheet", {
+            "symbol": symbol,
+            "row_count": 0,
+            "truncated": False,
+            "records": [],
+        }, exc)
 
 
 def get_cash_flow(symbol: str) -> dict:
     """Fetches and returns the latest cash flow statement of the company as a DataFrame."""
-    ticker = _get_ticker(symbol)
-    cash_flow = ticker.cashflow
-    payload = _dataframe_to_records(cash_flow)
-    payload.update({"symbol": symbol})
-    return payload
+    service = _get_service()
+    try:
+        cash_flow = service.get_cash_flow(symbol)
+        payload = _dataframe_to_records(cash_flow)
+        payload.update({"symbol": symbol})
+        return payload
+    except (MarketDataNotFoundError, MarketDataServiceError) as exc:
+        return _handle_service_error(symbol, "cash_flow", {
+            "symbol": symbol,
+            "row_count": 0,
+            "truncated": False,
+            "records": [],
+        }, exc)
 
 
 def get_analyst_recommendations(symbol: str) -> dict:
     """Fetches the latest analyst recommendations and returns the most common recommendation and its count."""
-    ticker = _get_ticker(symbol)
-    recommendations = ticker.recommendations
-    if recommendations.empty:
+    service = _get_service()
+    try:
+        recommendations = service.get_analyst_recommendations(symbol)
+        if recommendations.empty:
+            return {
+                "symbol": symbol,
+                "majority_recommendation": None,
+                "vote_count": 0,
+                "has_recommendations": False,
+            }
+
+        row_0 = recommendations.iloc[0, 1:]
+        max_votes = row_0.max()
+        majority_voting_result = row_0[row_0 == max_votes].index.tolist()
+
         return {
+            "symbol": symbol,
+            "majority_recommendation": majority_voting_result[0],
+            "vote_count": _to_json_value(max_votes),
+            "has_recommendations": True,
+        }
+    except (MarketDataNotFoundError, MarketDataServiceError) as exc:
+        return _handle_service_error(symbol, "analyst_recommendations", {
             "symbol": symbol,
             "majority_recommendation": None,
             "vote_count": 0,
             "has_recommendations": False,
-        }
-
-    row_0 = recommendations.iloc[0, 1:]
-    max_votes = row_0.max()
-    majority_voting_result = row_0[row_0 == max_votes].index.tolist()
-
-    return {
-        "symbol": symbol,
-        "majority_recommendation": majority_voting_result[0],
-        "vote_count": _to_json_value(max_votes),
-        "has_recommendations": True,
-    }
+        }, exc)
 
 
 # ---------------------------------------------------------------------------

@@ -456,6 +456,14 @@ class ModelRequest:
         cfg = get_provider_config(provider)
         resolved_model = model or resolve_model_name(provider)
         resolved_api_base = cfg.build_api_base(api_base)
+
+        # Resolve API key from env vars when not explicitly provided
+        if api_key is None:
+            if provider == "github" or provider == "proxied_github":
+                api_key = os.getenv("GITHUB_TOKEN")
+            elif provider == "deepseek" or provider == "proxied_deepseek":
+                api_key = os.getenv("DEEPSEEK_TOKEN")
+
         self.client = LiteLLMClient(
             provider=provider,
             model=resolved_model,
