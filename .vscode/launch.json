@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Financial Document Analyst Dashboard",
+            "name": "Research Studio Dashboard",
             "type": "debugpy",
             "request": "launch",
             "python": "${command:python.interpreterPath}",
